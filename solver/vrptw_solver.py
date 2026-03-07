@@ -6,29 +6,31 @@ from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
 
 logger = logging.getLogger(__name__)
-SECONDS_PER_DAY = 24 * 60 * 60
+MINUTES_PER_DAY = 24 * 60
 
 
 def solve_vrptw(
     time_matrix: list[list[float]],
     time_windows: list[tuple[int, int]],
     depot: int = 0,
+    courier_start_time: int = 480,
+    service_time_per_stop: int = 3,
 ) -> tuple[list[int], list[int]]:
     """
-    Solve VRPTW: single courier, start at depot, respect delivery time windows.
+    Solve VRPTW: single courier, start at depot at courier_start_time.
 
     Args:
-        time_matrix: Square matrix of travel times in seconds.
-                     time_matrix[i][j] = travel time from location i to j.
-                     Index 0 = office (depot).
-        time_windows: For each location i, (earliest, latest) in seconds since midnight.
-                      time_windows[i] = (min_arrival_sec, max_arrival_sec).
-                      Use (0, SECONDS_PER_DAY) for no constraint.
-        depot: Index of depot/office (default 0).
+        time_matrix: Square matrix of travel times in seconds (from OSRM).
+                     Index 0 = depot.
+        time_windows: For each location i, (earliest, latest) in minutes since midnight.
+                      Use (0, MINUTES_PER_DAY) for no constraint.
+        depot: Index of depot (must be 0).
+        courier_start_time: Shift start in minutes since midnight (e.g. 480 = 08:00).
+        service_time_per_stop: Fixed service duration in minutes per delivery stop.
 
     Returns:
-        (route, etas): route = list of location indices (excluding depot);
-                       etas = arrival time in seconds since midnight for each stop.
+        (route, etas): route = ordered list of location indices (excluding depot);
+                       etas = arrival time in minutes since midnight for each stop.
         ([], []) if no feasible solution.
     """
     if not time_matrix or not time_windows:
@@ -38,15 +40,18 @@ def solve_vrptw(
     num_locations = len(time_matrix)
     if len(time_windows) != num_locations:
         raise ValueError("time_windows length must match time_matrix")
+    if depot != 0:
+        raise ValueError("Depot must be node 0")
 
     num_vehicles = 1
-    slack_max = 3600  # allow 1h waiting
-    vehicle_max = SECONDS_PER_DAY
+    # Allow waiting up to 4 hours at any stop
+    slack_max = 4 * 60
 
-    def to_int(x: float) -> int:
-        if x is None:
-            return 0
-        return int(round(x))
+    def travel_minutes(i: int, j: int) -> int:
+        return int(round(time_matrix[i][j] / 60))
+
+    def service_minutes(node: int) -> int:
+        return 0 if node == depot else service_time_per_stop
 
     manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, depot)
     routing = pywrapcp.RoutingModel(manager)
@@ -54,7 +59,8 @@ def solve_vrptw(
     def time_callback(from_index: int, to_index: int) -> int:
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
-        return to_int(time_matrix[from_node][to_node])
+        # Transit = service time at origin + travel time to destination
+        return service_minutes(from_node) + travel_minutes(from_node, to_node)
 
     transit_callback_index = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
@@ -62,23 +68,33 @@ def solve_vrptw(
     routing.AddDimension(
         transit_callback_index,
         slack_max,
-        vehicle_max,
-        False,
+        MINUTES_PER_DAY,
+        False,  # do not force start cumul to zero
         "Time",
     )
     time_dimension = routing.GetDimensionOrDie("Time")
 
-    for location_idx, (tw_min, tw_max) in enumerate(time_windows):
+    # Fix courier departure from depot to exactly courier_start_time
+    start_index = routing.Start(0)
+    time_dimension.CumulVar(start_index).SetRange(courier_start_time, courier_start_time)
+
+    # Apply time windows to delivery stops
+    for location_idx in range(num_locations):
         if location_idx == depot:
             continue
+        tw_min, tw_max = time_windows[location_idx]
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetRange(tw_min, tw_max)
 
-    depot_tw_min, depot_tw_max = time_windows[depot]
-    index = routing.Start(0)
-    time_dimension.CumulVar(index).SetRange(depot_tw_min, depot_tw_max)
+    # Penalise waiting time in the primary objective.
+    # Span = end_cumul - start_cumul = travel + service + waiting.
+    # Arc cost already covers travel + service, so the span coefficient
+    # adds exactly 1 unit of cost per minute of waiting across the route.
+    # This makes the solver prefer arriving close to the window start
+    # rather than very early and idling.
+    time_dimension.SetSpanCostCoefficientForAllVehicles(1)
 
-    routing.AddVariableMinimizedByFinalizer(time_dimension.CumulVar(routing.Start(0)))
+    # Secondary: in case of ties, also minimise the absolute return time.
     routing.AddVariableMinimizedByFinalizer(time_dimension.CumulVar(routing.End(0)))
 
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
@@ -90,16 +106,19 @@ def solve_vrptw(
     )
     search_parameters.time_limit.seconds = 10
 
-    if depot != 0:
-        raise ValueError("Depot must be node 0")
-
-    logger.info("VRPTW solver: %d locations, depot=%d, 10s limit, GLS", num_locations, depot)
+    logger.info(
+        "VRPTW solver: %d locations, depot=%d, start=%02d:%02d, service=%dmin",
+        num_locations,
+        depot,
+        courier_start_time // 60,
+        courier_start_time % 60,
+        service_time_per_stop,
+    )
     solution = routing.SolveWithParameters(search_parameters)
     if not solution:
         logger.error("VRPTW: no feasible solution found")
         return [], []
 
-    logger.info("VRPTW: solution found, %d stops", num_locations - 1)
     route: list[int] = []
     etas: list[int] = []
     index = routing.Start(0)
@@ -111,4 +130,5 @@ def solve_vrptw(
             etas.append(eta)
         index = solution.Value(routing.NextVar(index))
 
+    logger.info("VRPTW: solution found, %d stops", len(route))
     return route, etas
