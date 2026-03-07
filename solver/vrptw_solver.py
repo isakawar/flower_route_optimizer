@@ -96,10 +96,10 @@ def solve_vrptw(
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetRange(tw_min, tw_max)
 
-    # Penalise waiting: span cost adds 1 unit/minute of waiting to the objective.
-    # Span = travel + service + wait; arc cost already covers travel + service,
-    # so the net effect is penalising idle time at each stop.
-    time_dimension.SetSpanCostCoefficientForAllVehicles(1)
+    # Penalise waiting directly: slack = idle time at each node before service.
+    # Coefficient 5 nudges the solver toward arriving close to the window start
+    # without making long waits infeasible.
+    time_dimension.SetSlackCostCoefficientForAllVehicles(5)
 
     # Finaliser: minimise return-to-depot time for each courier (tie-breaker)
     for v in range(num_couriers):
