@@ -36,7 +36,7 @@ def build_time_matrix(
 
     logger.info("OSRM Table API call: %d coordinates", len(coordinates))
     try:
-        response = requests.get(url, params=params, timeout=60)
+        response = requests.get(url, params=params, timeout=20)
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as e:
@@ -57,5 +57,22 @@ def build_time_matrix(
         logger.error("OSRM response missing distances")
         raise RuntimeError("OSRM response missing distances")
 
-    logger.info("OSRM: built %dx%d time and distance matrices", len(durations), len(durations[0]) if durations else 0)
+    n = len(durations)
+    logger.info("OSRM: built %dx%d time and distance matrices", n, len(durations[0]) if durations else 0)
+
+    # Log sample stats for debugging zig-zag issues
+    if n > 1:
+        times_flat = [durations[i][j] for i in range(n) for j in range(n) if i != j and durations[i][j] > 0]
+        dists_flat = [distances[i][j] for i in range(n) for j in range(n) if i != j and distances[i][j] > 0]
+        if times_flat:
+            logger.info(
+                "OSRM durations (s): min=%.0f, max=%.0f, avg=%.0f",
+                min(times_flat), max(times_flat), sum(times_flat) / len(times_flat),
+            )
+        if dists_flat:
+            logger.info(
+                "OSRM distances (m): min=%.0f, max=%.0f, avg=%.0f",
+                min(dists_flat), max(dists_flat), sum(dists_flat) / len(dists_flat),
+            )
+
     return durations, distances

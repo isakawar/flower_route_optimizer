@@ -14,6 +14,7 @@ export default function Home() {
   const [result, setResult] = useState<OptimizationResult | null>(null);
   const [lastStartTime, setLastStartTime] = useState("09:00");
   const [minCouriersRequired, setMinCouriersRequired] = useState<number | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [steps, setSteps] = useState<ProgressStep[]>(
     PROGRESS_STEPS.map((s) => ({ ...s, status: "pending" as const }))
   );
@@ -23,6 +24,7 @@ export default function Home() {
 
     setLastStartTime(params.startTime);
     setMinCouriersRequired(null);
+    setErrorMessage(null);
     setAppState("loading");
     setResult(null);
     setSteps(PROGRESS_STEPS.map((s, i) => ({ ...s, status: i === 0 ? "active" : "pending" })));
@@ -58,6 +60,8 @@ export default function Home() {
     } catch (err) {
       if (err instanceof InfeasibleError) {
         setMinCouriersRequired(err.minimumCouriersRequired);
+      } else if (err instanceof Error) {
+        setErrorMessage(err.message);
       }
       setAppState("error");
     }
@@ -66,6 +70,7 @@ export default function Home() {
   const handleReset = useCallback(() => {
     setAppState("idle");
     setResult(null);
+    setErrorMessage(null);
     setSteps(PROGRESS_STEPS.map((s) => ({ ...s, status: "pending" })));
   }, []);
 
@@ -142,7 +147,9 @@ export default function Home() {
                 ) : (
                   <>
                     <p className="text-text-primary font-medium mb-1">Помилка розрахунку</p>
-                    <p className="text-text-muted text-sm">Не вдалося завершити оптимізацію. Спробуйте ще раз.</p>
+                    <p className="text-text-muted text-sm mt-1">
+                      {errorMessage ?? "Не вдалося завершити оптимізацію. Спробуйте ще раз."}
+                    </p>
                   </>
                 )}
               </div>

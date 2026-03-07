@@ -7,7 +7,7 @@ import CourierCard from "./CourierCard";
 import RouteMap from "./RouteMap";
 import StopEditModal from "./StopEditModal";
 import { COURIER_COLORS } from "@/types";
-import type { OptimizationResult, DeliveryStop, RecalculateParams } from "@/types";
+import type { OptimizationResult, DeliveryStop, RecalculateParams, RecalculateRoute } from "@/types";
 import type { DragState, DropTarget } from "./CourierCard";
 import { recalculate } from "@/lib/api";
 
@@ -120,21 +120,20 @@ export default function ResultsDashboard({ result, startTime, onReset }: Props) 
     setRecalculating(true);
     setRecalcError(null);
     try {
-      const stops = mutableResult.routes.flatMap((r) =>
-        r.stops.map((s) => ({
+      const routes: RecalculateRoute[] = mutableResult.routes.map((r) => ({
+        courierId: r.courierId,
+        stops: r.stops.map((s) => ({
           lat: s.lat ?? 0,
           lng: s.lng ?? 0,
           address: s.address,
           timeStart: s.timeStart ?? null,
           timeEnd: s.timeEnd ?? null,
-        }))
-      );
+        })),
+      }));
       const params: RecalculateParams = {
-        stops,
+        routes,
         depot: mutableResult.depot,
         startTime,
-        numCouriers: mutableResult.routes.length,
-        capacity: 0,
       };
       const newResult = await recalculate(params);
       setMutableResult(newResult);

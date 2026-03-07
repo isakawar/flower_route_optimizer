@@ -65,20 +65,24 @@ export default function RouteMapClient({ result, highlightedCourier }: Props) {
         const isHighlighted = highlightedCourier === route.courierId;
         const isOtherHighlighted = highlightedCourier !== null && !isHighlighted;
 
-        // Route polyline: depot → stops
-        const routeCoords: [number, number][] = [[depot.lat, depot.lng]];
+        // Use OSRM road geometry if available, otherwise fall back to straight lines
+        const straightCoords: [number, number][] = [[depot.lat, depot.lng]];
         route.stops.forEach((s) => {
           if (s.lat !== undefined && s.lng !== undefined) {
-            routeCoords.push([s.lat, s.lng]);
+            straightCoords.push([s.lat, s.lng]);
           }
         });
+        const polylinePositions: [number, number][] =
+          route.geometry && route.geometry.length > 1
+            ? (route.geometry as [number, number][])
+            : straightCoords;
 
         return (
           <div key={route.courierId}>
             {/* Route line */}
-            {routeCoords.length > 1 && (
+            {polylinePositions.length > 1 && (
               <Polyline
-                positions={routeCoords}
+                positions={polylinePositions}
                 pathOptions={{
                   color,
                   weight: isHighlighted ? 3.5 : isOtherHighlighted ? 1.5 : 2.5,

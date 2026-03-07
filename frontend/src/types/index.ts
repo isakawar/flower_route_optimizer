@@ -17,12 +17,15 @@ export interface RecalculateStop {
   timeEnd?: string | null;
 }
 
-export interface RecalculateParams {
+export interface RecalculateRoute {
+  courierId: number;
   stops: RecalculateStop[];
+}
+
+export interface RecalculateParams {
+  routes: RecalculateRoute[];
   depot: { lat: number; lng: number };
   startTime: string;
-  numCouriers: number;
-  capacity: number;
 }
 
 export interface AddressSuggestion {
@@ -40,6 +43,7 @@ export interface CourierRoute {
   stops: DeliveryStop[];
   totalDriveMin: number;
   totalDistanceKm: number;
+  geometry?: [number, number][] | null; // [[lat, lng], ...] road path from OSRM
 }
 
 export interface OptimizationResult {
