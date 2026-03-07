@@ -1,4 +1,4 @@
-import type { OptimizationParams, OptimizationResult } from "@/types";
+import type { OptimizationParams, OptimizationResult, RecalculateParams } from "@/types";
 import { MOCK_RESULT } from "./mockData";
 
 // Simulate progressive progress updates
@@ -52,4 +52,18 @@ export async function* runOptimization(
 
   // Demo mode (no backend running)
   yield MOCK_RESULT;
+}
+
+export async function recalculate(params: RecalculateParams): Promise<OptimizationResult> {
+  const res = await fetch("/api/recalculate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.detail ?? `Server error ${res.status}`);
+  }
+  return res.json();
 }

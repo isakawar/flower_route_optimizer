@@ -5,6 +5,34 @@ export interface DeliveryStop {
   waitMin: number;
   lat?: number;
   lng?: number;
+  timeStart?: string | null; // "HH:MM" from original order, preserved for recalculation
+  timeEnd?: string | null;
+}
+
+export interface RecalculateStop {
+  lat: number;
+  lng: number;
+  address: string;
+  timeStart?: string | null;
+  timeEnd?: string | null;
+}
+
+export interface RecalculateParams {
+  stops: RecalculateStop[];
+  depot: { lat: number; lng: number };
+  startTime: string;
+  numCouriers: number;
+  capacity: number;
+}
+
+export interface AddressSuggestion {
+  displayName: string;
+  city: string;
+  region: string;
+  country: string;
+  lat: number;
+  lng: number;
+  importance: number;
 }
 
 export interface CourierRoute {
