@@ -11,28 +11,28 @@ OSRM_TABLE_URL = "http://router.project-osrm.org/table/v1/driving"
 def build_time_matrix(
     coordinates: list[tuple[float, float]],
     profile: str = "driving",
-) -> list[list[float]]:
+) -> tuple[list[list[float]], list[list[float]]]:
     """
-    Build a matrix of travel times between all pairs of coordinates.
+    Build time and distance matrices between all pairs of coordinates.
 
-    Uses OSRM Table API. Values are in seconds.
-    durations[i][j] = travel time from coordinate i to coordinate j.
+    Uses OSRM Table API.
+    durations[i][j] = travel time in seconds from i to j.
+    distances[i][j] = travel distance in meters from i to j.
 
     Args:
         coordinates: List of (lat, lng) pairs. E.g. [(50.45, 30.52), ...] for Kyiv.
         profile: OSRM profile (driving, walking, cycling). Default: driving.
 
     Returns:
-        Square matrix of travel times in seconds.
-        Returns empty list if request fails.
+        (durations, distances). Empty ([], []) if no coordinates.
     """
     if not coordinates:
-        return []
+        return [], []
 
     # OSRM expects lon,lat;lon,lat;...
     coord_str = ";".join(f"{lon},{lat}" for lat, lon in coordinates)
     url = f"{OSRM_TABLE_URL.replace('driving', profile)}/{coord_str}"
-    params = {"annotations": "duration"}
+    params = {"annotations": "duration,distance"}
 
     logger.info("OSRM Table API call: %d coordinates", len(coordinates))
     try:
@@ -49,9 +49,13 @@ def build_time_matrix(
         raise RuntimeError(f"OSRM error: {err}")
 
     durations = data.get("durations")
+    distances = data.get("distances")
     if durations is None:
         logger.error("OSRM response missing durations")
         raise RuntimeError("OSRM response missing durations")
+    if distances is None:
+        logger.error("OSRM response missing distances")
+        raise RuntimeError("OSRM response missing distances")
 
-    logger.info("OSRM: built %dx%d time matrix", len(durations), len(durations[0]) if durations else 0)
-    return durations
+    logger.info("OSRM: built %dx%d time and distance matrices", len(durations), len(durations[0]) if durations else 0)
+    return durations, distances

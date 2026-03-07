@@ -1,7 +1,11 @@
 """Traveling Salesman Problem solver using Google OR-Tools."""
 
+import logging
+
 from ortools.constraint_solver import pywrapcp
 from ortools.constraint_solver import routing_enums_pb2
+
+logger = logging.getLogger(__name__)
 
 
 def solve_tsp(
@@ -24,6 +28,9 @@ def solve_tsp(
     """
     if not time_matrix:
         return []
+
+    if depot != 0:
+        raise ValueError("Depot must be node 0")
 
     num_locations = len(time_matrix)
     num_vehicles = 1
@@ -49,6 +56,10 @@ def solve_tsp(
     search_parameters.first_solution_strategy = (
         routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     )
+    search_parameters.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    search_parameters.time_limit.seconds = 10
 
     solution = routing.SolveWithParameters(search_parameters)
     if not solution:

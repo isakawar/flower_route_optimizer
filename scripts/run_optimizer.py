@@ -90,12 +90,12 @@ def main() -> None:
     # 3. Build matrix [office, order1, order2, ...]
     coords = [office_coords] + [(o.lat, o.lng) for o in geocoded]
     try:
-        time_matrix = build_time_matrix(coords)
+        time_matrix, distance_matrix = build_time_matrix(coords)
     except Exception as e:
         logger.exception("Failed to build time matrix: %s", e)
         raise
     if not use_json:
-        print(f"Built {len(time_matrix)}x{len(time_matrix)} time matrix")
+        print(f"Built {len(time_matrix)}x{len(time_matrix)} time and distance matrices")
 
     # 3b. Build time windows (seconds since midnight)
     SECONDS_PER_DAY = 24 * 60 * 60
@@ -118,17 +118,64 @@ def main() -> None:
             print("Solver found no solution.")
         sys.exit(1)
 
-    # 5. Output route
+    # 5. Route statistics: full sequence is depot -> r0 -> r1 -> ... -> depot
+    def safe_float(x):
+        return float(x) if x is not None else 0.0
+
+    full_route = [0] + list(route_indices) + [0]
+    total_travel_time_sec = sum(
+        safe_float(time_matrix[full_route[i]][full_route[i + 1]])
+        for i in range(len(full_route) - 1)
+    )
+    total_distance_m = sum(
+        safe_float(distance_matrix[full_route[i]][full_route[i + 1]])
+        for i in range(len(full_route) - 1)
+    )
+    segment_times_sec = [
+        safe_float(time_matrix[full_route[i]][full_route[i + 1]])
+        for i in range(len(full_route) - 1)
+    ]
+
+    def format_duration(sec: float) -> str:
+        m = int(sec // 60)
+        s = int(sec % 60)
+        if m >= 60:
+            return f"{m // 60}h {m % 60}min"
+        return f"{m} min" if s == 0 else f"{m} min {s}s"
+
+    def format_distance(m: float) -> str:
+        if m >= 1000:
+            return f"{m / 1000:.1f} km"
+        return f"{int(m)} m"
+
+    # 6. Output route
     if use_json:
         route_json = [
             {
                 "order_id": geocoded[idx - 1].id,
                 "eta": seconds_to_time(eta_sec),
                 "position_in_route": i,
+                "travel_time_from_previous_sec": int(segment_times_sec[i - 1]),
             }
             for i, (idx, eta_sec) in enumerate(zip(route_indices, etas), 1)
         ]
-        print(json.dumps({"route": route_json}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "route": route_json,
+                    "statistics": {
+                        "total_travel_time_sec": int(total_travel_time_sec),
+                        "total_travel_time": format_duration(total_travel_time_sec),
+                        "total_distance_m": int(total_distance_m),
+                        "total_distance": format_distance(total_distance_m),
+                        "segment_travel_times_sec": [int(t) for t in segment_times_sec],
+                        "segment_travel_times": [format_duration(t) for t in segment_times_sec],
+                    },
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     else:
         print("-" * 40)
         print("Optimal route (office → deliveries → office):")
@@ -136,8 +183,21 @@ def main() -> None:
         for i, (idx, eta_sec) in enumerate(zip(route_indices, etas), 1):
             order = geocoded[idx - 1]
             eta_str = seconds_to_time(eta_sec)
-            print(f"  {i}. Order {order.id}: {order.city}, {order.address} {order.house}  ETA: {eta_str}")
+            seg = format_duration(segment_times_sec[i])  # segment into this stop
+            print(f"  {i}. Order {order.id}: {order.city}, {order.address} {order.house}  ETA: {eta_str}  (drive: {seg})")
         print(f"  End: {office_address}")
+        # Last segment: last stop → office
+        print("-" * 40)
+        print("Route statistics:")
+        print(f"  Total travel time: {format_duration(total_travel_time_sec)}")
+        print(f"  Total distance:   {format_distance(total_distance_m)}")
+        print("  Travel time between stops:")
+        print(f"    Office → Order {geocoded[route_indices[0] - 1].id}: {format_duration(segment_times_sec[0])}")
+        for i in range(1, len(route_indices)):
+            from_id = geocoded[route_indices[i - 1] - 1].id
+            to_id = geocoded[route_indices[i] - 1].id
+            print(f"    Order {from_id} → Order {to_id}: {format_duration(segment_times_sec[i])}")
+        print(f"    Order {geocoded[route_indices[-1] - 1].id} → Office: {format_duration(segment_times_sec[-1])}")
 
 
 if __name__ == "__main__":
