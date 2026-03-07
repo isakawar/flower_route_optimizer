@@ -5,6 +5,44 @@ Reads a CSV of delivery orders, geocodes addresses, builds a real-road travel-ti
 
 ---
 
+## Running
+
+### 1 — Backend (FastAPI)
+
+```bash
+# From the project root
+source venv/bin/activate
+uvicorn main:app --reload --port 8000
+```
+
+### 2 — Frontend (Next.js)
+
+```bash
+# In a second terminal, from the project root
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:3000**
+
+> Start the backend first. If it's not running, the UI switches to demo mode automatically.
+
+---
+
+## First-time setup
+
+```bash
+# 1. Create virtualenv and install Python deps
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# 2. Install frontend deps
+cd frontend && npm install && cd ..
+```
+
+---
+
 ## Pipeline
 
 ```
@@ -41,7 +79,56 @@ Print route with ETA
 
 ---
 
-## Installation
+## Web UI
+
+The project includes a full dashboard built with **Next.js + React + Leaflet**.
+
+### Start the backend (FastAPI)
+
+```bash
+python -m venv venv
+source venv/bin/activate       # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+uvicorn main:app --reload --port 8000
+```
+
+The API will be available at `http://localhost:8000`.
+Swagger docs: `http://localhost:8000/docs`
+
+### Start the frontend (Next.js)
+
+In a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000` in your browser.
+
+> **Note:** Start the backend first. If it's not running, the frontend automatically switches to demo mode with mock data.
+
+### API endpoint
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/optimize` | Run route optimization |
+| `GET` | `/api/health` | Health check |
+
+`POST /api/optimize` accepts `multipart/form-data`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `file` | CSV file | required | Orders CSV |
+| `start_time` | string | `09:00` | Courier shift start `HH:MM` |
+| `num_couriers` | integer | `1` | Number of couriers |
+| `capacity` | integer | unlimited | Max packages per courier |
+
+---
+
+## Installation (CLI only)
 
 ```bash
 python -m venv venv
@@ -56,6 +143,9 @@ requests
 pandas
 pydantic
 ortools
+fastapi
+uvicorn[standard]
+python-multipart
 ```
 
 ---
