@@ -1,0 +1,183 @@
+@import url("https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Inter:wght@300;400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-base: #0a0a12;
+  --bg-card: #12121e;
+  --rose-soft: #d4a5bf;
+  --gold-soft: #c9a96e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: #f0ece8;
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* Floral mesh background */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(
+      ellipse 80% 60% at 20% -10%,
+      rgba(138, 79, 110, 0.08) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse 60% 50% at 80% 110%,
+      rgba(107, 65, 90, 0.06) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse 40% 40% at 60% 30%,
+      rgba(201, 169, 110, 0.03) 0%,
+      transparent 50%
+    );
+  pointer-events: none;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a12;
+}
+::-webkit-scrollbar-thumb {
+  background: #252538;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a2a40;
+}
+
+/* Leaflet overrides */
+.leaflet-container {
+  background: #0d0d1a !important;
+  font-family: "Inter", sans-serif;
+}
+.leaflet-tile {
+  /* CartoDB dark_all tiles are already dark-themed — only minor brightness tweak */
+  filter: brightness(0.9);
+}
+.leaflet-control-attribution {
+  background: rgba(10, 10, 18, 0.85) !important;
+  color: #5a5a70 !important;
+  font-size: 10px !important;
+}
+.leaflet-control-zoom a {
+  background: #12121e !important;
+  color: #d4a5bf !important;
+  border-color: #252538 !important;
+}
+.leaflet-control-zoom a:hover {
+  background: #191928 !important;
+}
+.leaflet-popup-content-wrapper {
+  background: #191928 !important;
+  color: #f0ece8 !important;
+  border: 1px solid #252538 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
+}
+.leaflet-popup-tip {
+  background: #191928 !important;
+}
+
+/* Custom file input */
+input[type="file"] {
+  display: none;
+}
+
+/* Number input arrows */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Global keyframes — used by Tailwind animate-* classes and inline SVG styles */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes pulseSubtle {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-8px); }
+}
+
+/* Tailwind animation helpers */
+.animate-fade-up {
+  animation: fadeUp 0.5s ease-out both;
+}
+
+@layer utilities {
+  .text-gradient-rose {
+    background: linear-gradient(135deg, #d4a5bf 0%, #c9a96e 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .border-gradient-rose {
+    position: relative;
+    background-clip: padding-box;
+  }
+
+  .glass {
+    background: rgba(18, 18, 30, 0.8);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+
+  .card-base {
+    @apply bg-bg-card border border-border rounded-2xl shadow-card;
+  }
+
+  .shimmer-bg {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(212, 165, 191, 0.06) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+}
