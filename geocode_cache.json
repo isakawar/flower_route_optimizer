@@ -30,5 +30,85 @@
   "Бровари, Ярослава мудрого 28": {
     "lat": 50.4996793,
     "lng": 30.777926
+  },
+  "Kyiv, Revutskoho 16": {
+    "lat": 50.4112808,
+    "lng": 30.6437557
+  },
+  "Kyiv, Sahaidachnoho 4г": {
+    "lat": 50.4602297,
+    "lng": 30.5230442
+  },
+  "Kyiv, Zhylianska 63в": {
+    "lat": 50.4372377,
+    "lng": 30.5016765
+  },
+  "Vyshneve, Nezalezhnosti 122": {
+    "lat": 49.7607913,
+    "lng": 28.9842362
+  },
+  "Kyiv, Voskresenka 138": {
+    "lat": 50.4842146,
+    "lng": 30.598646
+  },
+  "Kyiv, Volodymyrska 195": {
+    "lat": 50.4575467,
+    "lng": 30.5179559
+  },
+  "Kyiv, Petra Hryhorenka Avenue 54": {
+    "lat": 50.4034235,
+    "lng": 30.6310994
+  },
+  "Kyiv, Bohdana Khmelnytskoho 156": {
+    "lat": 50.4446883,
+    "lng": 30.521124
+  },
+  "Kyiv, Tarasa Shevchenka Boulevard 92": {
+    "lat": 50.4432694,
+    "lng": 30.5136619
+  },
+  "Kyiv, Brovarskyi Avenue 40": {
+    "lat": 50.4541077,
+    "lng": 30.6052433
+  },
+  "Brovary, Kyivska 69в": {
+    "lat": 50.5064882,
+    "lng": 30.7773316
+  },
+  "Kyiv, Antonovycha 181б": {
+    "lat": 50.4378979,
+    "lng": 30.5137764
+  },
+  "Kyiv, Trostianetska 41": {
+    "lat": 50.414684,
+    "lng": 30.6484198
+  },
+  "Kyiv, Instytutska 146": {
+    "lat": 50.445079,
+    "lng": 30.5360885
+  },
+  "Kyiv, Velyka Vasylkivska 175": {
+    "lat": 50.4363437,
+    "lng": 30.5159389
+  },
+  "Bucha, Vokzalna 26": {
+    "lat": 50.5667357,
+    "lng": 30.2105732
+  },
+  "Kyiv, Tarasa Shevchenka Boulevard 162": {
+    "lat": 50.4432694,
+    "lng": 30.5136619
+  },
+  "Kyiv, Obolon Avenue 155": {
+    "lat": 50.4993034,
+    "lng": 30.4980369
+  },
+  "Kyiv, Miloslavska 54": {
+    "lat": 50.5305957,
+    "lng": 30.5928038
+  },
+  "Kyiv, Volodymyrska 163": {
+    "lat": 50.4498532,
+    "lng": 30.5149364
   }
 }

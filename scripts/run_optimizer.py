@@ -22,8 +22,7 @@ DEFAULT_START_TIME = "08:00"
 SERVICE_TIME_PER_STOP = 3  # minutes
 
 # Node 0 in the matrix is always the depot (office).
-# Orders occupy nodes 1..N.  node_to_order(idx) maps a solver node index to
-# the corresponding entry in the `geocoded` list.
+# Orders occupy nodes 1..N.
 DEPOT_NODE = 0
 
 
@@ -57,130 +56,22 @@ def format_distance(m: float) -> str:
     return f"{int(m)} m"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="run_optimizer.py",
-        description="Optimize flower delivery routes.",
-    )
-    parser.add_argument("csv_path", help="Path to orders CSV file")
-    parser.add_argument(
-        "office_address",
-        nargs="?",
-        default=DEFAULT_OFFICE,
-        help=f"Depot/office address (default: {DEFAULT_OFFICE!r})",
-    )
-    parser.add_argument(
-        "--start-time",
-        default=DEFAULT_START_TIME,
-        metavar="HH:MM",
-        help="Courier shift start time (default: 08:00)",
-    )
-    parser.add_argument("--json", action="store_true", help="Output route as JSON")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+def build_courier_stops(
+    route_nodes: list[int],
+    geocoded: list,
+    time_matrix: list[list[float]],
+    courier_start_min: int,
+) -> list[dict]:
+    """
+    Walk a single courier's route and compute arrival, waiting, and ETA per stop.
 
-    parsed = parser.parse_args()
-    csv_path = parsed.csv_path
-    office_address = parsed.office_address
-    use_json = parsed.json
-    verbose = parsed.verbose
-    start_time_str = parsed.start_time
-
-    courier_start_min = parse_time_to_minutes(start_time_str)
-    if courier_start_min is None:
-        print(f"Error: invalid --start-time value: {start_time_str!r} (expected HH:MM)")
-        sys.exit(1)
-
-    if not use_json:
-        print("Pipeline: CSV → Geocode → Matrix → Solver")
-        print("-" * 40)
-
-    # 1. Read CSV
-    orders = read_orders(csv_path)
-    if not use_json:
-        print(f"Read {len(orders)} orders from {csv_path}")
-
-    if not orders:
-        logger.error("No orders to optimize")
-        if use_json:
-            print(json.dumps({"route": [], "error": "No orders to optimize"}))
-        else:
-            print("No orders to optimize.")
-        sys.exit(0)
-
-    # 2. Geocode addresses
-    geocoder = GeocodingService()
-    office_coords = geocoder.geocode(office_address)
-    if not office_coords:
-        logger.error("Could not geocode office: %s", office_address)
-        if use_json:
-            print(json.dumps({"route": [], "error": f"Could not geocode office: {office_address}"}))
-        else:
-            print(f"Error: Could not geocode office address: {office_address}")
-        sys.exit(1)
-
-    for order in orders:
-        addr = f"{order.city}, {order.address} {order.house}"
-        if coords := geocoder.geocode(addr):
-            order.lat, order.lng = coords
-        elif not use_json:
-            print(f"Warning: Could not geocode order {order.id}: {addr}")
-
-    geocoded = [o for o in orders if o.lat is not None]
-    if not use_json and len(geocoded) < len(orders):
-        print(f"Skipping {len(orders) - len(geocoded)} orders that could not be geocoded")
-    if not geocoded:
-        logger.error("No geocoded orders to optimize")
-        if use_json:
-            print(json.dumps({"route": [], "error": "No geocoded orders to optimize"}))
-        else:
-            print("No geocoded orders to optimize.")
-        sys.exit(1)
-
-    # 3. Build matrix: node 0 = office (depot), nodes 1..N = delivery orders
-    coords = [office_coords] + [(o.lat, o.lng) for o in geocoded]
-    try:
-        time_matrix, distance_matrix = build_time_matrix(coords)
-    except Exception as e:
-        logger.exception("Failed to build time matrix: %s", e)
-        raise
-    if not use_json:
-        print(f"Built {len(time_matrix)}x{len(time_matrix)} time and distance matrices")
-
-    # 3b. Build time windows in minutes since midnight
-    # Depot: courier must start at courier_start_min, can return any time before end of day
-    time_windows: list[tuple[int, int]] = [(courier_start_min, MINUTES_PER_DAY)]
-    for order in geocoded:
-        tw_start = parse_time_to_minutes(order.time_start)
-        tw_end = parse_time_to_minutes(order.time_end)
-        if tw_start is not None and tw_end is not None and tw_start <= tw_end:
-            time_windows.append((tw_start, tw_end))
-        else:
-            time_windows.append((0, MINUTES_PER_DAY))
-
-    # 4. Run solver (VRPTW with time windows)
-    route_indices, _ = solve_vrptw(
-        time_matrix,
-        time_windows,
-        depot=0,
-        courier_start_time=courier_start_min,
-        service_time_per_stop=SERVICE_TIME_PER_STOP,
-    )
-    if not route_indices:
-        logger.error("Solver found no solution")
-        if use_json:
-            print(json.dumps({"route": [], "error": "Solver found no solution"}))
-        else:
-            print("Solver found no solution.")
-        sys.exit(1)
-
-    # 5. Post-process: walk route to compute arrival, waiting, ETA per stop.
-    #    The solver guarantees route_indices contains only delivery nodes (1..N),
-    #    never the depot (node 0).  node_to_order_index() enforces this invariant.
+    Returns a list of stop dicts ready for display / JSON output.
+    """
     stops = []
-    current_time = courier_start_min  # departure from depot (no service at depot)
+    current_time = courier_start_min
     prev_node = DEPOT_NODE
 
-    for node in route_indices:
+    for node in route_nodes:
         order = geocoded[node_to_order_index(node)]
         drive_min = int(round(time_matrix[prev_node][node] / 60))
         natural_arrival = current_time + drive_min
@@ -212,44 +103,237 @@ def main() -> None:
         current_time = eta_min + SERVICE_TIME_PER_STOP
         prev_node = node
 
-    # Return leg: last delivery node → depot (node 0)
-    last_node = route_indices[-1] if route_indices else DEPOT_NODE
-    return_drive_min = int(round(time_matrix[last_node][DEPOT_NODE] / 60))
+    return stops
 
-    prev_nodes = [DEPOT_NODE] + list(route_indices)
-    total_distance_m = sum(
-        distance_matrix[prev_nodes[i]][route_indices[i]]
-        for i in range(len(route_indices))
-    ) + distance_matrix[last_node][DEPOT_NODE]
-    total_drive_min = sum(s["drive_min"] for s in stops) + return_drive_min
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="run_optimizer.py",
+        description="Optimize flower delivery routes.",
+    )
+    parser.add_argument("csv_path", help="Path to orders CSV file")
+    parser.add_argument(
+        "office_address",
+        nargs="?",
+        default=DEFAULT_OFFICE,
+        help=f"Depot/office address (default: {DEFAULT_OFFICE!r})",
+    )
+    parser.add_argument(
+        "--start-time",
+        default=DEFAULT_START_TIME,
+        metavar="HH:MM",
+        help="Courier shift start time (default: 08:00)",
+    )
+    parser.add_argument(
+        "--couriers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of couriers / vehicles (default: 1)",
+    )
+    parser.add_argument(
+        "--capacity",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max packages per courier (default: unlimited)",
+    )
+    parser.add_argument("--json", action="store_true", help="Output route as JSON")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+
+    parsed = parser.parse_args()
+    csv_path = parsed.csv_path
+    office_address = parsed.office_address
+    use_json = parsed.json
+    verbose = parsed.verbose
+    start_time_str = parsed.start_time
+    num_couriers = parsed.couriers
+    capacity = parsed.capacity
+
+    if num_couriers < 1:
+        print("Error: --couriers must be >= 1")
+        sys.exit(1)
+    if capacity is not None and capacity < 1:
+        print("Error: --capacity must be >= 1")
+        sys.exit(1)
+
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stderr,
+    )
+
+    courier_start_min = parse_time_to_minutes(start_time_str)
+    if courier_start_min is None:
+        print(f"Error: invalid --start-time value: {start_time_str!r} (expected HH:MM)")
+        sys.exit(1)
+
+    if not use_json:
+        print("Pipeline: CSV → Geocode → Matrix → Solver")
+        print("-" * 40)
+
+    # 1. Read CSV
+    orders = read_orders(csv_path)
+    if not use_json:
+        print(f"Read {len(orders)} orders from {csv_path}")
+
+    if not orders:
+        logger.error("No orders to optimize")
+        if use_json:
+            print(json.dumps({"couriers": [], "error": "No orders to optimize"}))
+        else:
+            print("No orders to optimize.")
+        sys.exit(0)
+
+    # 2. Geocode addresses
+    geocoder = GeocodingService()
+    office_coords = geocoder.geocode(office_address)
+    if not office_coords:
+        logger.error("Could not geocode office: %s", office_address)
+        if use_json:
+            print(json.dumps({"couriers": [], "error": f"Could not geocode office: {office_address}"}))
+        else:
+            print(f"Error: Could not geocode office address: {office_address}")
+        sys.exit(1)
+
+    for order in orders:
+        addr = f"{order.city}, {order.address} {order.house}"
+        if coords := geocoder.geocode(addr):
+            order.lat, order.lng = coords
+        elif not use_json:
+            print(f"Warning: Could not geocode order {order.id}: {addr}")
+
+    geocoded = [o for o in orders if o.lat is not None]
+    if not use_json and len(geocoded) < len(orders):
+        print(f"Skipping {len(orders) - len(geocoded)} orders that could not be geocoded")
+    if not geocoded:
+        logger.error("No geocoded orders to optimize")
+        if use_json:
+            print(json.dumps({"couriers": [], "error": "No geocoded orders to optimize"}))
+        else:
+            print("No geocoded orders to optimize.")
+        sys.exit(1)
+
+    # Warn if capacity * couriers < orders (mathematically impossible to serve all)
+    if capacity is not None and capacity * num_couriers < len(geocoded):
+        msg = (
+            f"Impossible: {num_couriers} courier(s) × {capacity} packages = "
+            f"{num_couriers * capacity} slots, but {len(geocoded)} orders to deliver."
+        )
+        if use_json:
+            print(json.dumps({"couriers": [], "error": msg}))
+        else:
+            print(f"Error: {msg}")
+        sys.exit(1)
+
+    # 3. Build matrix: node 0 = office (depot), nodes 1..N = delivery orders
+    coords = [office_coords] + [(o.lat, o.lng) for o in geocoded]
+    try:
+        time_matrix, distance_matrix = build_time_matrix(coords)
+    except Exception as e:
+        logger.exception("Failed to build time matrix: %s", e)
+        raise
+    if not use_json:
+        print(f"Built {len(time_matrix)}x{len(time_matrix)} time and distance matrices")
+
+    # 3b. Build time windows in minutes since midnight
+    # Depot window anchors start time; delivery orders use their own windows or full day.
+    time_windows: list[tuple[int, int]] = [(courier_start_min, MINUTES_PER_DAY)]
+    for order in geocoded:
+        tw_start = parse_time_to_minutes(order.time_start)
+        tw_end = parse_time_to_minutes(order.time_end)
+        if tw_start is not None and tw_end is not None and tw_start <= tw_end:
+            time_windows.append((tw_start, tw_end))
+        else:
+            time_windows.append((0, MINUTES_PER_DAY))
+
+    # 4. Run solver
+    routes, _ = solve_vrptw(
+        time_matrix,
+        time_windows,
+        depot=DEPOT_NODE,
+        courier_start_time=courier_start_min,
+        service_time_per_stop=SERVICE_TIME_PER_STOP,
+        num_couriers=num_couriers,
+        capacity=capacity,
+    )
+
+    if all(len(r) == 0 for r in routes):
+        logger.error("Solver found no solution")
+        if use_json:
+            print(json.dumps({"couriers": [], "error": "Solver found no solution"}))
+        else:
+            print("Solver found no solution.")
+        sys.exit(1)
+
+    # 5. Post-process each courier's route
+    courier_data = []
+    for v, route_nodes in enumerate(routes):
+        stops = build_courier_stops(route_nodes, geocoded, time_matrix, courier_start_min)
+
+        last_node = route_nodes[-1] if route_nodes else DEPOT_NODE
+        return_drive_min = int(round(time_matrix[last_node][DEPOT_NODE] / 60))
+
+        prev_nodes = [DEPOT_NODE] + list(route_nodes)
+        total_distance_m = sum(
+            distance_matrix[prev_nodes[i]][route_nodes[i]]
+            for i in range(len(route_nodes))
+        ) + distance_matrix[last_node][DEPOT_NODE]
+        total_drive_min = sum(s["drive_min"] for s in stops) + return_drive_min
+
+        courier_data.append({
+            "courier_id": v + 1,
+            "stops": stops,
+            "return_drive_min": return_drive_min,
+            "total_drive_min": total_drive_min,
+            "total_distance_m": total_distance_m,
+        })
 
     # 6. Output
     if use_json:
-        route_json = [
-            {
-                "order_id": s["order_id"],
-                "eta": minutes_to_time(s["eta_min"]),
-                "drive_time_min": s["drive_min"],
-                "waiting_time_min": s["waiting_min"],
-                "time_window": (
-                    f"{minutes_to_time(s['tw_start'])}-{minutes_to_time(s['tw_end'])}"
-                    if s["has_window"]
-                    else None
-                ),
-                "position_in_route": i + 1,
-            }
-            for i, s in enumerate(stops)
-        ]
+        couriers_json = []
+        for cd in courier_data:
+            route_json = [
+                {
+                    "order_id": s["order_id"],
+                    "eta": minutes_to_time(s["eta_min"]),
+                    "drive_time_min": s["drive_min"],
+                    "waiting_time_min": s["waiting_min"],
+                    "time_window": (
+                        f"{minutes_to_time(s['tw_start'])}-{minutes_to_time(s['tw_end'])}"
+                        if s["has_window"]
+                        else None
+                    ),
+                    "position_in_route": i + 1,
+                }
+                for i, s in enumerate(cd["stops"])
+            ]
+            couriers_json.append({
+                "courier_id": cd["courier_id"],
+                "route": route_json,
+                "statistics": {
+                    "total_drive_time_min": cd["total_drive_min"],
+                    "total_drive_time": format_duration(cd["total_drive_min"]),
+                    "total_distance_m": int(cd["total_distance_m"]),
+                    "total_distance": format_distance(cd["total_distance_m"]),
+                },
+            })
+
+        grand_drive = sum(cd["total_drive_min"] for cd in courier_data)
+        grand_dist = sum(cd["total_distance_m"] for cd in courier_data)
         print(
             json.dumps(
                 {
-                    "route": route_json,
+                    "courier_start": minutes_to_time(courier_start_min),
+                    "num_couriers": num_couriers,
+                    "capacity": capacity,
+                    "couriers": couriers_json,
                     "statistics": {
-                        "courier_start": minutes_to_time(courier_start_min),
-                        "total_drive_time_min": total_drive_min,
-                        "total_drive_time": format_duration(total_drive_min),
-                        "total_distance_m": int(total_distance_m),
-                        "total_distance": format_distance(total_distance_m),
+                        "total_drive_time_min": grand_drive,
+                        "total_drive_time": format_duration(grand_drive),
+                        "total_distance_m": int(grand_dist),
+                        "total_distance": format_distance(grand_dist),
                     },
                 },
                 indent=2,
@@ -257,28 +341,47 @@ def main() -> None:
             )
         )
     else:
-        print("-" * 40)
-        print(f"Start: {minutes_to_time(courier_start_min)}  Office ({office_address})")
-        print()
-        for i, s in enumerate(stops, 1):
-            o = s["order"]
-            addr = f"{o.city}, {o.address} {o.house}"
-            print(f"{i}. Order {s['order_id']}  —  {addr}")
-            if s["has_window"] and s["waiting_min"] > 0:
-                print(f"   Arrival: {minutes_to_time(s['natural_arrival'])}")
-                print(f"   Window:  {minutes_to_time(s['tw_start'])}–{minutes_to_time(s['tw_end'])}")
-                print(f"   Wait:    {format_duration(s['waiting_min'])}")
-                print(f"   ETA:     {minutes_to_time(s['eta_min'])}")
-            else:
-                print(f"   ETA:     {minutes_to_time(s['eta_min'])}")
-            print(f"   Drive:   {format_duration(s['drive_min'])}")
+        for cd in courier_data:
+            stops = cd["stops"]
             print()
-        print(f"Return to depot.  ({format_duration(return_drive_min)})")
-        print("-" * 40)
-        print("Route statistics:")
-        print(f"  Courier start:  {minutes_to_time(courier_start_min)}")
-        print(f"  Total drive:    {format_duration(total_drive_min)}")
-        print(f"  Total distance: {format_distance(total_distance_m)}")
+            print(f"Courier {cd['courier_id']}")
+            print("-" * 40)
+            if not stops:
+                print("  (no deliveries assigned)")
+                continue
+            print(f"Start: {minutes_to_time(courier_start_min)}  Office ({office_address})")
+            print()
+            for i, s in enumerate(stops, 1):
+                o = s["order"]
+                addr = f"{o.city}, {o.address} {o.house}"
+                print(f"  {i}. Order {s['order_id']}  —  {addr}")
+                if s["has_window"] and s["waiting_min"] > 0:
+                    print(f"     Arrival: {minutes_to_time(s['natural_arrival'])}")
+                    print(f"     Window:  {minutes_to_time(s['tw_start'])}–{minutes_to_time(s['tw_end'])}")
+                    print(f"     Wait:    {format_duration(s['waiting_min'])}")
+                    print(f"     ETA:     {minutes_to_time(s['eta_min'])}")
+                else:
+                    print(f"     ETA:     {minutes_to_time(s['eta_min'])}")
+                print(f"     Drive:   {format_duration(s['drive_min'])}")
+                print()
+            print(f"Return to depot.  ({format_duration(cd['return_drive_min'])})")
+            print()
+            print(f"  Drive total: {format_duration(cd['total_drive_min'])}")
+            print(f"  Distance:    {format_distance(cd['total_distance_m'])}")
+
+        print()
+        print("=" * 40)
+        print("Summary:")
+        print(f"  Couriers:    {num_couriers}")
+        if capacity is not None:
+            print(f"  Capacity:    {capacity} packages/courier")
+        print(f"  Start time:  {minutes_to_time(courier_start_min)}")
+        total_orders = sum(len(cd["stops"]) for cd in courier_data)
+        print(f"  Orders:      {total_orders} delivered")
+        grand_drive = sum(cd["total_drive_min"] for cd in courier_data)
+        grand_dist = sum(cd["total_distance_m"] for cd in courier_data)
+        print(f"  Total drive: {format_duration(grand_drive)}")
+        print(f"  Total dist:  {format_distance(grand_dist)}")
 
 
 if __name__ == "__main__":
