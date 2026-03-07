@@ -3,3 +3,6 @@ requests
 pandas
 pydantic
 ortools
+fastapi
+uvicorn[standard]
+python-multipart

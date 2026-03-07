@@ -14,7 +14,8 @@ export async function* runOptimization(
     onStep(steps[i]);
   }
 
-  // Try real API first, fall back to mock
+  // Try real API; throw on backend errors, fall back to mock only if unreachable
+  let backendReachable = false;
   try {
     const formData = new FormData();
     formData.append("file", params.csvFile);
@@ -25,18 +26,30 @@ export async function* runOptimization(
     const res = await fetch("/api/optimize", {
       method: "POST",
       body: formData,
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(60_000),
     });
+
+    backendReachable = true; // got an HTTP response → backend is running
 
     if (res.ok) {
       const data = await res.json();
       yield data as OptimizationResult;
       return;
     }
-  } catch {
-    // Backend not available — use demo data
+
+    // Backend returned an error — surface it instead of silently using mock data
+    const body = await res.json().catch(() => ({}));
+    const detail = body?.detail ?? `Server error ${res.status}`;
+    throw new Error(detail);
+  } catch (err) {
+    if (backendReachable) {
+      // Re-throw: backend is up but returned an error (bad CSV, no solution, etc.)
+      throw err;
+    }
+    // Backend is not running — fall back to demo data so the UI is still usable
+    console.info("[api] Backend unreachable — using demo data");
   }
 
-  // Return mock data (demo mode)
+  // Demo mode (no backend running)
   yield MOCK_RESULT;
 }
