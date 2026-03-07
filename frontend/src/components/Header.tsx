@@ -66,8 +66,8 @@ function FlowerLogo({ size = 36 }: { size?: number }) {
 
 const navLinks = [
   { label: "Оптимізатор", href: "#optimizer" },
-  { label: "Результати", href: "#results" },
-  { label: "Карта", href: "#map" },
+  //{ label: "Результати", href: "#results" },
+  //{ label: "Карта", href: "#map" },
 ];
 
 export default function Header() {

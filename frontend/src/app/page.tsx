@@ -161,9 +161,9 @@ export default function Home() {
       <footer className="border-t border-border/50 py-6">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex items-center justify-between">
           <span className="text-text-muted text-xs">
-            © 2024 <span className="text-text-secondary">Kvitkova Povnya</span>
+            © 2026 <span className="text-text-secondary">Kvitkova Povnya</span>
           </span>
-          <span className="text-text-muted text-xs">Route Optimizer v2</span>
+          <span className="text-text-muted text-xs">Route Optimizer v0.2</span>
         </div>
       </footer>
     </div>
