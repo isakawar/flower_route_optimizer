@@ -1,0 +1,21 @@
+id,city,address,house,time_start,time_end
+1,Kyiv,Revutskoho,16,15:00,17:00
+2,Kyiv,Sahaidachnoho,4г,,
+3,Kyiv,Zhylianska,63в,15:00,17:00
+4,Vyshneve,Nezalezhnosti,122,,
+5,Kyiv,Voskresenka,138,11:00,13:00
+6,Kyiv,Volodymyrska,195,,
+7,Kyiv,Petra Hryhorenka Avenue,54,12:00,14:00
+8,Kyiv,Bohdana Khmelnytskoho,156,,
+9,Kyiv,Tarasa Shevchenka Boulevard,92,,
+10,Kyiv,Brovarskyi Avenue,40,10:00,11:00
+11,Brovary,Kyivska,69в,,
+12,Kyiv,Antonovycha,181б,,
+13,Kyiv,Trostianetska,41,13:00,15:00
+14,Kyiv,Instytutska,146,,
+15,Kyiv,Velyka Vasylkivska,175,,
+16,Bucha,Vokzalna,26,,
+17,Kyiv,Tarasa Shevchenka Boulevard,162,10:00,12:00
+18,Kyiv,Obolon Avenue,155,13:00,15:00
+19,Kyiv,Miloslavska,54,16:00,18:00
+20,Kyiv,Volodymyrska,163,,

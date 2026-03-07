@@ -27,8 +27,8 @@ def read_orders(csv_path: str | Path) -> list[Order]:
                 city=row["city"].strip(),
                 address=row["address"].strip(),
                 house=row["house"].strip(),
-                time_start=row.get("time_start", "").strip() or None,
-                time_end=row.get("time_end", "").strip() or None,
+                time_start=(row.get("time_start") or "").strip() or None,
+                time_end=(row.get("time_end") or "").strip() or None,
             )
             orders.append(order)
 
