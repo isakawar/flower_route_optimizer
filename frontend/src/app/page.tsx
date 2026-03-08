@@ -170,7 +170,7 @@ export default function Home() {
           <span className="text-text-muted text-xs">
             © 2026 <span className="text-text-secondary">Kvitkova Povnya</span>
           </span>
-          <span className="text-text-muted text-xs">Route Optimizer v0.2</span>
+          <span className="text-text-muted text-xs">Route Optimizer 0.3v</span>
         </div>
       </footer>
     </div>

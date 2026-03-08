@@ -1,0 +1,4 @@
+# file: /Users/vladbilobrov/flower_route_optimizer/main.py
+# hypothesis_version: 6.151.9
+
+[0.0, 100, 400, 422, 500, 1000, '%H:%M:%S', '*', '.csv', '/api/health', '/api/optimize', '/api/recalculate', '09:00', ';', 'GET', 'INFEASIBLE', 'Matrix build failed', 'No stops provided', 'Ok', 'POST', 'Solver crashed', '__infeasible__', 'address', 'capacity_constraint', 'code', 'coordinates', 'courierId', 'depot', 'detail', 'driveMin', 'droppedOrders', 'error', 'eta', 'full', 'geojson', 'geometries', 'geometry', 'lat', 'lng', 'message', 'numCouriers', 'ok', 'overview', 'reason', 'routes', 'stats', 'status', 'stops', 'timeEnd', 'timeStart', 'totalDeliveries', 'totalDistanceKm', 'totalDriveMin', 'waitMin', 'wb']

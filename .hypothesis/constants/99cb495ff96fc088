@@ -1,0 +1,4 @@
+# file: /Users/vladbilobrov/flower_route_optimizer/services/csv_service.py
+# hypothesis_version: 6.151.9
+
+['address', 'city', 'delivery_window_end', 'house', 'id', 'time_end', 'time_start', 'utf-8']

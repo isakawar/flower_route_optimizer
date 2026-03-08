@@ -1,0 +1,4 @@
+# file: /Users/vladbilobrov/flower_route_optimizer/utils/time_parser.py
+# hypothesis_version: 6.151.9
+
+[3600, '^(\\d{1,2}):(\\d{2})$']

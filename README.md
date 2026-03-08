@@ -6,20 +6,60 @@ Delivery route optimization tool for a flower business. Uploads a CSV of orders 
 
 ## Quick start (Docker)
 
-```bash
-# Copy and fill in your secrets
-cp .env.example .env          # add GOOGLE_MAPS_API_KEY if you have one
+### Prerequisites
 
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+
+### 1 — Clone and configure
+
+```bash
+git clone https://github.com/isakawar/flower_route_optimizer.git
+cd flower_route_optimizer
+
+# Create .env from the example (Google Maps key is optional)
+cp .env.example .env
+```
+
+Edit `.env` and set `GOOGLE_MAPS_API_KEY` if you have one (falls back to free Nominatim geocoding otherwise).
+
+### 2 — Build and start
+
+```bash
 docker compose up --build
 ```
+
+First build takes ~5 min (downloads base images, installs OR-Tools). Subsequent starts are fast.
+
+### 3 — Open the app
 
 | Service | URL |
 |---------|-----|
 | Frontend | http://localhost:3000 |
 | Backend API | http://localhost:8000 |
-| Swagger | http://localhost:8000/docs |
+| Swagger docs | http://localhost:8000/docs |
 
-> On first run Docker builds all images (~5 min). Subsequent starts are fast.
+### Useful commands
+
+```bash
+# Start in background
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# View logs for one service
+docker compose logs -f backend
+
+# Stop everything
+docker compose down
+
+# Stop and delete volumes (clears Redis geocode cache)
+docker compose down -v
+
+# Rebuild a single service after code change
+docker compose build backend
+docker compose up -d backend
+```
 
 ---
 

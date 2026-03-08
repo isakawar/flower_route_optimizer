@@ -1,0 +1,4 @@
+# file: /Users/vladbilobrov/flower_route_optimizer/services/matrix_service.py
+# hypothesis_version: 6.151.9
+
+[';', 'OSRM API error: %s', 'OSRM error: %s', 'Ok', 'Unknown', 'annotations', 'code', 'distances', 'driving', 'duration,distance', 'durations', 'message']
