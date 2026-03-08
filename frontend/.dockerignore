@@ -1,0 +1,15 @@
+# Dependencies (installed fresh inside the image)
+node_modules/
+
+# Next.js build output (produced inside builder stage)
+.next/
+
+# Dev / OS artefacts
+.DS_Store
+*.code-workspace
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
