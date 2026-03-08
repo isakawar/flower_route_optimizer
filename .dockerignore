@@ -1,0 +1,42 @@
+# Version control
+.git
+.gitignore
+
+# Python artefacts
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.hypothesis
+.mypy_cache
+.ruff_cache
+
+# Virtual environment (never copy into image)
+venv/
+.venv/
+
+# Development / test files
+tests/
+scripts/
+docs/
+pytest.ini
+requirements.txt
+
+# Frontend (built separately)
+frontend/
+
+# Data and secrets
+.env
+.env.*
+geocode_cache.json
+data/
+
+# Editor / OS
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Claude artifacts
+.claude/

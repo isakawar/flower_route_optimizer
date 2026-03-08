@@ -1,0 +1,61 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - run: pytest
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: test  # only deploy if tests pass
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+
+            cd ~/flower_route_optimizer
+
+            git pull origin main
+
+            docker compose pull redis 2>/dev/null || true
+
+            docker compose build --no-cache backend frontend
+
+            docker compose up -d --remove-orphans
+
+            # Wait for backend health check to pass (max 90 s)
+            echo "Waiting for backend to become healthy..."
+            for i in $(seq 1 18); do
+              STATUS=$(docker compose ps --format json backend \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health',''))" 2>/dev/null || echo "")
+              if [ "$STATUS" = "healthy" ]; then
+                echo "Backend is healthy."
+                break
+              fi
+              echo "  attempt $i/18 — status: ${STATUS:-unknown}"
+              sleep 5
+            done
+
+            # Remove dangling images to keep the VPS disk clean
+            docker image prune -f

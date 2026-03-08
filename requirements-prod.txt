@@ -1,4 +1,3 @@
-
 requests
 pandas
 pydantic
@@ -8,6 +7,3 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 redis
-pytest
-httpx
-hypothesis
