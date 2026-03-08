@@ -1,4 +1,0 @@
-# file: /Users/vladbilobrov/flower_route_optimizer/solver/vrptw_solver.py
-# hypothesis_version: 6.151.9
-
-[0.0, 480, 1000, 'Capacity', 'Depot must be node 0', 'Time', 'VRPTW: empty input', 'no', 'unlimited', 'yes']
