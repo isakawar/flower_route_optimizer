@@ -54,12 +54,15 @@ def make_matrix(n: int) -> tuple[list[list[float]], list[list[float]]]:
 
 _GEOCODE_MAP: dict[str, tuple[float, float]] = {
     main.DEPOT_ADDRESS: (50.4501, 30.5234),
-    # small_orders.csv / time_windows_orders.csv shared addresses
-    "Kyiv, Khreshchatyk 1, Ukraine":          (50.4600, 30.5100),
-    "Kyiv, Obolon Avenue 15, Ukraine":         (50.5000, 30.4900),
-    "Kyiv, Velyka Vasylkivska 50, Ukraine":    (50.4200, 30.5100),
-    "Kyiv, Heroiv Dnipra 33, Ukraine":         (50.5200, 30.4700),
-    "Kyiv, Borshchahivska 5, Ukraine":         (50.4300, 30.4800),
+    # small_orders.csv + infeasible_orders.csv
+    "Київ, вул. Хрещатик 1, Ukraine":                (50.4548, 30.5238),
+    "Київ, просп. Перемоги 26, Ukraine":              (50.4571, 30.5060),
+    "Київ, вул. Богдана Хмельницького 55, Ukraine":   (50.4480, 30.5190),
+    "Буча, вул. Вокзальна 10, Ukraine":               (50.5491, 30.2295),
+    "Бровари, вул. Київська 20, Ukraine":             (50.5115, 30.7890),
+    # time_windows_orders.csv (additional addresses)
+    "Київ, вул. Жилянська 63, Ukraine":               (50.4420, 30.5180),
+    "Ірпінь, вул. Соборна 12, Ukraine":               (50.5223, 30.2474),
 }
 
 
