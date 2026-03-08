@@ -5,6 +5,37 @@ export interface DeliveryStop {
   waitMin: number;
   lat?: number;
   lng?: number;
+  timeStart?: string | null; // "HH:MM" from original order, preserved for recalculation
+  timeEnd?: string | null;
+}
+
+export interface RecalculateStop {
+  lat: number;
+  lng: number;
+  address: string;
+  timeStart?: string | null;
+  timeEnd?: string | null;
+}
+
+export interface RecalculateRoute {
+  courierId: number;
+  stops: RecalculateStop[];
+}
+
+export interface RecalculateParams {
+  routes: RecalculateRoute[];
+  depot: { lat: number; lng: number };
+  startTime: string;
+}
+
+export interface AddressSuggestion {
+  displayName: string;
+  city: string;
+  region: string;
+  country: string;
+  lat: number;
+  lng: number;
+  importance: number;
 }
 
 export interface CourierRoute {
@@ -12,6 +43,7 @@ export interface CourierRoute {
   stops: DeliveryStop[];
   totalDriveMin: number;
   totalDistanceKm: number;
+  geometry?: [number, number][] | null; // [[lat, lng], ...] road path from OSRM
 }
 
 export interface OptimizationResult {

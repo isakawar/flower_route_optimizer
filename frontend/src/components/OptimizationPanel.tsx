@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload,
   Clock,
@@ -30,17 +30,31 @@ function NumberStepper({
   max: number;
   label: string;
 }) {
+  const [raw, setRaw] = useState(String(value));
+
+  useEffect(() => {
+    setRaw(String(value));
+  }, [value]);
+
+  const commit = (s: string) => {
+    const v = parseInt(s);
+    if (!isNaN(v) && v >= min && v <= max) {
+      onChange(v);
+    } else {
+      setRaw(String(value)); // revert to last valid
+    }
+  };
+
   return (
     <div className="flex items-center gap-0 rounded-xl border border-border bg-bg-base overflow-hidden focus-within:border-rose-soft/40 transition-colors">
       <input
         type="number"
-        value={value}
+        value={raw}
         min={min}
         max={max}
-        onChange={(e) => {
-          const v = parseInt(e.target.value);
-          if (!isNaN(v) && v >= min && v <= max) onChange(v);
-        }}
+        onChange={(e) => setRaw(e.target.value)}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && commit(raw)}
         aria-label={label}
         className="flex-1 bg-transparent px-4 py-3 text-sm text-text-primary text-center
                    outline-none placeholder-text-muted"
@@ -211,7 +225,7 @@ export default function OptimizationPanel({ onSubmit, isLoading }: Props) {
                   <circle cx="12" cy="12" r="10" />
                   <path d="M12 16v-4M12 8h.01" strokeLinecap="round" />
                 </svg>
-                <span>Очікувані колонки: id, city, address, house, time_start, time_end</span>
+                <span>Очікувані колонки: city, address, house, delivery_window_start, delivery_window_end</span>
               </div>
             </div>
 

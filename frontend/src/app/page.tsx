@@ -5,13 +5,16 @@ import Header from "@/components/Header";
 import OptimizationPanel from "@/components/OptimizationPanel";
 import ProgressUI from "@/components/ProgressUI";
 import ResultsDashboard from "@/components/ResultsDashboard";
-import { runOptimization } from "@/lib/api";
+import { runOptimization, InfeasibleError } from "@/lib/api";
 import { PROGRESS_STEPS } from "@/lib/mockData";
 import type { AppState, OptimizationParams, OptimizationResult, ProgressStep } from "@/types";
 
 export default function Home() {
   const [appState, setAppState] = useState<AppState>("idle");
   const [result, setResult] = useState<OptimizationResult | null>(null);
+  const [lastStartTime, setLastStartTime] = useState("09:00");
+  const [minCouriersRequired, setMinCouriersRequired] = useState<number | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [steps, setSteps] = useState<ProgressStep[]>(
     PROGRESS_STEPS.map((s) => ({ ...s, status: "pending" as const }))
   );
@@ -19,6 +22,9 @@ export default function Home() {
   const handleSubmit = useCallback(async (params: OptimizationParams) => {
     const stepIds: string[] = PROGRESS_STEPS.map((s) => s.id);
 
+    setLastStartTime(params.startTime);
+    setMinCouriersRequired(null);
+    setErrorMessage(null);
     setAppState("loading");
     setResult(null);
     setSteps(PROGRESS_STEPS.map((s, i) => ({ ...s, status: i === 0 ? "active" : "pending" })));
@@ -51,7 +57,12 @@ export default function Home() {
       } else {
         setAppState("error");
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof InfeasibleError) {
+        setMinCouriersRequired(err.minimumCouriersRequired);
+      } else if (err instanceof Error) {
+        setErrorMessage(err.message);
+      }
       setAppState("error");
     }
   }, []);
@@ -59,6 +70,7 @@ export default function Home() {
   const handleReset = useCallback(() => {
     setAppState("idle");
     setResult(null);
+    setErrorMessage(null);
     setSteps(PROGRESS_STEPS.map((s) => ({ ...s, status: "pending" })));
   }, []);
 
@@ -110,21 +122,36 @@ export default function Home() {
 
           {appState === "complete" && result && (
             <div className="animate-fade-up">
-              <ResultsDashboard result={result} onReset={handleReset} />
+              <ResultsDashboard result={result} startTime={lastStartTime} onReset={handleReset} />
             </div>
           )}
 
           {appState === "error" && (
             <div className="flex flex-col items-center justify-center py-32 text-center gap-6">
-              <div className="w-16 h-16 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400">
+              <div className={`w-16 h-16 rounded-full flex items-center justify-center ${minCouriersRequired ? "bg-yellow-500/10 border border-yellow-500/20" : "bg-red-500/10 border border-red-500/20"}`}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={minCouriersRequired ? "text-yellow-400" : "text-red-400"}>
                   <circle cx="12" cy="12" r="10" />
                   <path d="M12 8v4M12 16h.01" strokeLinecap="round" />
                 </svg>
               </div>
               <div>
-                <p className="text-text-primary font-medium mb-1">Помилка розрахунку</p>
-                <p className="text-text-muted text-sm">Не вдалося завершити оптимізацію. Спробуйте ще раз.</p>
+                {minCouriersRequired ? (
+                  <>
+                    <p className="text-text-primary font-medium mb-2">Недостатньо кур&apos;єрів</p>
+                    <p className="text-text-muted text-sm mb-1">Для цих замовлень з вікнами доставки потрібно:</p>
+                    <p className="text-yellow-400 text-2xl font-bold tabular-nums">
+                      мінімум {minCouriersRequired} кур&apos;єр{minCouriersRequired === 1 ? "" : minCouriersRequired < 5 ? "и" : "ів"}
+                    </p>
+                    <p className="text-text-muted text-sm mt-2">Збільшіть кількість кур&apos;єрів і спробуйте знову.</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-text-primary font-medium mb-1">Помилка розрахунку</p>
+                    <p className="text-text-muted text-sm mt-1">
+                      {errorMessage ?? "Не вдалося завершити оптимізацію. Спробуйте ще раз."}
+                    </p>
+                  </>
+                )}
               </div>
               <button
                 onClick={handleReset}
@@ -141,9 +168,9 @@ export default function Home() {
       <footer className="border-t border-border/50 py-6">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex items-center justify-between">
           <span className="text-text-muted text-xs">
-            © 2024 <span className="text-text-secondary">Kvitkova Povnya</span>
+            © 2026 <span className="text-text-secondary">Kvitkova Povnya</span>
           </span>
-          <span className="text-text-muted text-xs">Route Optimizer v2</span>
+          <span className="text-text-muted text-xs">Route Optimizer v0.2</span>
         </div>
       </footer>
     </div>
