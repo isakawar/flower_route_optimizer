@@ -21,6 +21,3 @@ jobs:
 
       - name: Run tests
         run: pytest
-        # Slow property tests (Hypothesis + OR-Tools, ~11 min) are excluded by
-        # default via pytest.ini addopts = -m "not slow".
-        # To include them: pytest -m slow

@@ -1,6 +1,5 @@
 services:
 
-  # ── Redis (geocoding cache) ───────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -13,7 +12,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Backend ───────────────────────────────────────────────────────────────────
   backend:
     image: ${BACKEND_IMAGE:-ghcr.io/isakawar/flower-route-optimizer-backend:latest}
     restart: unless-stopped
@@ -36,11 +34,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    labels:
-      # Watchtower watches only containers with this label
-      com.centurylinklabs.watchtower.enable: "true"
 
-  # ── Frontend ──────────────────────────────────────────────────────────────────
   frontend:
     image: ${FRONTEND_IMAGE:-ghcr.io/isakawar/flower-route-optimizer-frontend:latest}
     restart: unless-stopped
@@ -49,28 +43,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-
-  # ── Watchtower (auto-pull updated images from GHCR) ───────────────────────────
-  watchtower:
-    image: containrrr/watchtower:latest
-    restart: unless-stopped
-    volumes:
-      # Docker socket — required to manage other containers
-      - /var/run/docker.sock:/var/run/docker.sock
-      # GHCR credentials (created once on VPS via: docker login ghcr.io)
-      - /root/.docker/config.json:/config.json:ro
-    environment:
-      # Only watch containers labelled com.centurylinklabs.watchtower.enable=true
-      WATCHTOWER_LABEL_ENABLE: "true"
-      # Poll GHCR every 5 minutes
-      WATCHTOWER_POLL_INTERVAL: "300"
-      # Remove old images after pulling new ones
-      WATCHTOWER_CLEANUP: "true"
-      # Notify on updates (optional — remove if not needed)
-      # WATCHTOWER_NOTIFICATIONS: slack
-      # WATCHTOWER_NOTIFICATION_SLACK_HOOK_URL: ${SLACK_WEBHOOK_URL}
 
 volumes:
   redis_data:
