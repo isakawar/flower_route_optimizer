@@ -1,0 +1,5 @@
+id,city,address,house,delivery_window_start,delivery_window_end
+1,Kyiv,Khreshchatyk,1,10:00,12:00
+2,Kyiv,Obolon Avenue,15,11:00,13:00
+3,Kyiv,Velyka Vasylkivska,50,13:00,15:00
+4,Kyiv,Heroiv Dnipra,33,14:00,16:00
