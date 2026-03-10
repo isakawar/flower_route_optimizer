@@ -1,6 +1,5 @@
 services:
 
-  # ── Redis (geocoding cache) ───────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -13,7 +12,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Backend ───────────────────────────────────────────────────────────────────
   backend:
     image: ${BACKEND_IMAGE:-ghcr.io/isakawar/flower-route-optimizer-backend:latest}
     restart: unless-stopped
@@ -26,51 +24,32 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # OR-Tools is CPU + memory heavy during optimization.
+    # Health check must tolerate 60+ second CPU bursts without triggering a restart.
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\"",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=25)\"",
         ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    labels:
-      # Watchtower watches only containers with this label
-      com.centurylinklabs.watchtower.enable: "true"
+      interval: 60s      # check less often — optimizer runs for 30-90 s
+      timeout: 30s       # allow slow responses under CPU load
+      retries: 5         # tolerate up to 5 consecutive failures (~5 min grace)
+      start_period: 60s  # don't count failures during cold start
+    deploy:
+      resources:
+        limits:
+          memory: 3g     # OR-Tools can spike to 1-2 GB; cap prevents OOM kill
 
-  # ── Frontend ──────────────────────────────────────────────────────────────────
   frontend:
     image: ${FRONTEND_IMAGE:-ghcr.io/isakawar/flower-route-optimizer-frontend:latest}
     restart: unless-stopped
     ports:
       - "3000:3000"
+    # No service_healthy condition: frontend just needs the backend port to exist.
+    # A healthy backend is confirmed by the backend's own healthcheck above.
     depends_on:
-      backend:
-        condition: service_healthy
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-
-  # ── Watchtower (auto-pull updated images from GHCR) ───────────────────────────
-  watchtower:
-    image: containrrr/watchtower:latest
-    restart: unless-stopped
-    volumes:
-      # Docker socket — required to manage other containers
-      - /var/run/docker.sock:/var/run/docker.sock
-      # GHCR credentials (created once on VPS via: docker login ghcr.io)
-      - /root/.docker/config.json:/config.json:ro
-    environment:
-      # Only watch containers labelled com.centurylinklabs.watchtower.enable=true
-      WATCHTOWER_LABEL_ENABLE: "true"
-      # Poll GHCR every 5 minutes
-      WATCHTOWER_POLL_INTERVAL: "300"
-      # Remove old images after pulling new ones
-      WATCHTOWER_CLEANUP: "true"
-      # Notify on updates (optional — remove if not needed)
-      # WATCHTOWER_NOTIFICATIONS: slack
-      # WATCHTOWER_NOTIFICATION_SLACK_HOOK_URL: ${SLACK_WEBHOOK_URL}
+      - backend
 
 volumes:
   redis_data:
