@@ -116,32 +116,54 @@ class TestMatrixValues:
 # ---------------------------------------------------------------------------
 
 class TestMatrixErrors:
-    def test_osrm_error_code_raises(self):
+    """
+    OSRM failures (bad status code, missing fields, network errors) fall back
+    to Haversine instead of raising — verify the fallback returns valid matrices.
+    """
+
+    COORDS = [(50.45, 30.52), (50.46, 30.53)]
+    N = 2
+
+    def _assert_valid_matrix(self, durations, distances):
+        assert len(durations) == self.N
+        assert len(distances) == self.N
+        assert all(len(row) == self.N for row in durations)
+        assert all(len(row) == self.N for row in distances)
+        # Diagonal must be zero; off-diagonal must be positive (Haversine)
+        for i in range(self.N):
+            assert durations[i][i] == 0.0
+            assert distances[i][i] == 0.0
+            for j in range(self.N):
+                if i != j:
+                    assert durations[i][j] > 0
+                    assert distances[i][j] > 0
+
+    def test_osrm_error_code_falls_back_to_haversine(self):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"code": "InvalidQuery", "message": "bad request"}
         mock_resp.raise_for_status.return_value = None
         with patch("services.matrix_service.requests.get", MagicMock(return_value=mock_resp)):
-            with pytest.raises(RuntimeError, match="OSRM error"):
-                build_time_matrix([(50.45, 30.52), (50.46, 30.53)])
+            durations, distances = build_time_matrix(self.COORDS)
+        self._assert_valid_matrix(durations, distances)
 
-    def test_missing_durations_raises(self):
+    def test_missing_durations_falls_back_to_haversine(self):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"code": "Ok", "distances": [[0, 1], [1, 0]]}
         mock_resp.raise_for_status.return_value = None
         with patch("services.matrix_service.requests.get", MagicMock(return_value=mock_resp)):
-            with pytest.raises(RuntimeError, match="missing durations"):
-                build_time_matrix([(50.45, 30.52), (50.46, 30.53)])
+            durations, distances = build_time_matrix(self.COORDS)
+        self._assert_valid_matrix(durations, distances)
 
-    def test_missing_distances_raises(self):
+    def test_missing_distances_falls_back_to_haversine(self):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"code": "Ok", "durations": [[0, 300], [300, 0]]}
         mock_resp.raise_for_status.return_value = None
         with patch("services.matrix_service.requests.get", MagicMock(return_value=mock_resp)):
-            with pytest.raises(RuntimeError, match="missing distances"):
-                build_time_matrix([(50.45, 30.52), (50.46, 30.53)])
+            durations, distances = build_time_matrix(self.COORDS)
+        self._assert_valid_matrix(durations, distances)
 
-    def test_network_error_raises(self):
+    def test_network_error_falls_back_to_haversine(self):
         import requests as req
         with patch("services.matrix_service.requests.get", side_effect=req.RequestException("timeout")):
-            with pytest.raises(req.RequestException):
-                build_time_matrix([(50.45, 30.52), (50.46, 30.53)])
+            durations, distances = build_time_matrix(self.COORDS)
+        self._assert_valid_matrix(durations, distances)
