@@ -3,10 +3,12 @@
 import asyncio
 import logging
 import math
+import os
 import random
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -37,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 DEPOT_ADDRESS = "вулиця Нагірна, 18, Київ, Ukraine"
 SERVICE_TIME_PER_STOP = 3  # minutes
-OSRM_ROUTE_URL = "http://router.project-osrm.org/route/v1/driving"
+OSRM_ROUTE_URL = os.getenv("OSRM_URL", "http://router.project-osrm.org/table/v1/driving").replace(
+    "/table/v1/", "/route/v1/"
+)
 
 # Set to False to skip OSRM road geometry requests entirely (faster, draws straight lines)
 ENABLE_ROUTE_GEOMETRY = True
@@ -107,7 +111,7 @@ def fetch_route_geometry(coords: list[tuple[float, float]]) -> list[list[float]]
         resp = requests.get(
             f"{OSRM_ROUTE_URL}/{coord_str}",
             params={"overview": "full", "geometries": "geojson"},
-            timeout=5,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -271,8 +275,9 @@ def _optimize_sync(
     if all(len(r) == 0 for r in routes):
         raise HTTPException(status_code=500, detail="Solver found no feasible solution")
 
-    # 8. Build response
+    # 8. Build response (geometry fetched in parallel after the main loop)
     result_routes = []
+    geo_coords_per_route: list[list[tuple[float, float]]] = []
     total_deliveries = 0
     total_drive_min = 0
     total_distance_km = 0.0
@@ -328,19 +333,26 @@ def _optimize_sync(
             [office_coords]
             + [(geocoded[n - 1].lat, geocoded[n - 1].lng) for n in route_nodes]
         )
-        geometry = fetch_route_geometry(geo_coords)
+        geo_coords_per_route.append(geo_coords)
 
         result_routes.append({
             "courierId": v + 1,
             "stops": stops,
             "totalDriveMin": route_drive_min,
             "totalDistanceKm": round(route_distance_km, 2),
-            "geometry": geometry,
+            "geometry": None,  # filled below
         })
 
         total_deliveries += len(stops)
         total_drive_min += route_drive_min
         total_distance_km += route_distance_km
+
+    # Fetch all route geometries in parallel — was sequential (n × 5 s), now max 5 s total.
+    if geo_coords_per_route:
+        with ThreadPoolExecutor(max_workers=len(geo_coords_per_route)) as executor:
+            geometries = list(executor.map(fetch_route_geometry, geo_coords_per_route))
+        for i, geom in enumerate(geometries):
+            result_routes[i]["geometry"] = geom
 
     elapsed = time.monotonic() - t_start
     logger.info(
