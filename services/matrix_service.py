@@ -69,7 +69,7 @@ def _osrm_request(
             resp = requests.get(url, params=params, timeout=_TIMEOUT)
             resp.raise_for_status()
             return resp.json()
-        except requests.RequestException as exc:
+        except Exception as exc:   # covers RequestException + JSONDecodeError
             last_exc = exc
             logger.warning("OSRM attempt %d/%d failed: %s", attempt, _RETRIES, exc)
             if attempt < _RETRIES:
@@ -109,9 +109,9 @@ def build_time_matrix(
 
     try:
         data = _osrm_request(url, params)
-    except requests.RequestException as exc:
+    except Exception as exc:
         logger.error(
-            "OSRM unreachable after %d retries (%s). Falling back to Haversine.", _RETRIES, exc
+            "OSRM failed after %d retries (%s). Falling back to Haversine.", _RETRIES, exc
         )
         durations, distances = _haversine_matrix(coordinates)
         logger.warning(
