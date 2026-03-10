@@ -1,6 +1,8 @@
 """FastAPI server for the flower delivery route optimizer."""
 
 import asyncio
+import csv as _csv
+import io
 import logging
 import math
 import os
@@ -16,7 +18,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -473,12 +475,25 @@ def _recalculate_sync(
 
 app = FastAPI(title="Kvitkova Povnya Route Optimizer")
 
+# CORS: comma-separated list of allowed origins, or "*" to allow all.
+# Example: ALLOWED_ORIGINS=https://mycrm.com,https://app.mycrm.com
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+_allow_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_allow_origins,
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
+
+# Optional API key auth. Set API_KEY env var to enable; if empty — auth is disabled.
+_API_KEY = os.getenv("API_KEY", "")
+
+
+def _check_api_key(x_api_key: str | None) -> None:
+    if _API_KEY and x_api_key != _API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 @app.exception_handler(Exception)
@@ -488,6 +503,23 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"detail": f"Internal server error: {exc}"},
     )
+
+
+class OrderInput(BaseModel):
+    """A single delivery order for the JSON optimize endpoint."""
+    id: int | None = None
+    city: str
+    address: str
+    house: str
+    delivery_window_start: str | None = None
+    delivery_window_end: str | None = None
+
+
+class OptimizeJsonRequest(BaseModel):
+    orders: list[OrderInput]
+    start_time: str = "09:00"
+    num_couriers: int = 1
+    capacity: int | None = None
 
 
 class RecalculateStop(BaseModel):
@@ -525,6 +557,55 @@ async def optimize(
     raw = await file.read()
     try:
         result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error in optimization thread")
+        raise HTTPException(status_code=500, detail=f"Internal error: {exc}") from exc
+
+    if result.get("__infeasible__"):
+        return JSONResponse(status_code=422, content={k: v for k, v in result.items() if k != "__infeasible__"})
+
+    return result
+
+
+@app.post("/api/optimize/json")
+async def optimize_json(
+    body: OptimizeJsonRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    """
+    JSON alternative to POST /api/optimize.
+    Accepts orders as a JSON array instead of a CSV file upload.
+    Suitable for CRM / server-to-server integrations.
+    """
+    _check_api_key(x_api_key)
+
+    if not body.orders:
+        raise HTTPException(status_code=400, detail="No orders provided")
+
+    # Convert OrderInput list → CSV bytes so the existing pipeline can process it
+    buf = io.StringIO()
+    writer = _csv.DictWriter(
+        buf,
+        fieldnames=["id", "city", "address", "house", "delivery_window_start", "delivery_window_end"],
+    )
+    writer.writeheader()
+    for idx, o in enumerate(body.orders, start=1):
+        writer.writerow({
+            "id": o.id if o.id is not None else idx,
+            "city": o.city,
+            "address": o.address,
+            "house": o.house,
+            "delivery_window_start": o.delivery_window_start or "",
+            "delivery_window_end": o.delivery_window_end or "",
+        })
+    raw = buf.getvalue().encode("utf-8")
+
+    try:
+        result = await asyncio.to_thread(
+            _optimize_sync, raw, body.start_time, body.num_couriers, body.capacity
+        )
     except HTTPException:
         raise
     except Exception as exc:
