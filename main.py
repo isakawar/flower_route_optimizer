@@ -402,7 +402,10 @@ def _recalculate_sync(
             time_matrix, distance_matrix = build_time_matrix(courier_coords)
         except Exception as exc:
             logger.exception("Matrix build failed for courier %d", route.courierId)
-            raise HTTPException(status_code=500, detail=f"Matrix build failed: {exc}") from exc
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "OSRM_UNAVAILABLE", "message": f"OSRM matrix build failed: {exc}"},
+            ) from exc
 
         stops_out = []
         current_time = courier_start_min
@@ -537,7 +540,7 @@ class RecalculateRoute(BaseModel):
 
 class RecalculateRequest(BaseModel):
     routes: list[RecalculateRoute]
-    depot: dict  # {"lat": float, "lng": float}
+    depot: dict | None = None  # {"lat": float, "lng": float}; None → default Kyiv depot
     startTime: str = "09:00"
 
 
@@ -618,23 +621,54 @@ async def optimize_json(
     return result
 
 
+_DEFAULT_DEPOT = (50.4422, 30.5367)  # Kyiv city center fallback
+
+
 @app.post("/api/recalculate")
-async def recalculate_routes(body: RecalculateRequest):
+async def recalculate_routes(
+    body: RecalculateRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _check_api_key(x_api_key)
+
     if not body.routes or all(len(r.stops) == 0 for r in body.routes):
-        raise HTTPException(status_code=400, detail="No stops provided")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": "routes array is empty or has no stops"},
+        )
 
     courier_start_min = _parse_minutes(body.startTime)
     if courier_start_min is None:
-        raise HTTPException(status_code=400, detail=f"Invalid startTime: {body.startTime!r}")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": f"Invalid startTime: {body.startTime!r}"},
+        )
 
-    depot_lat = body.depot.get("lat")
-    depot_lng = body.depot.get("lng")
-    if depot_lat is None or depot_lng is None:
-        raise HTTPException(status_code=400, detail="depot must have lat and lng")
+    # Validate stops and drop those with missing coordinates
+    for route in body.routes:
+        invalid = [s for s in route.stops if s.lat is None or s.lng is None]
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_INPUT", "message": f"Courier {route.courierId}: {len(invalid)} stop(s) missing lat/lng"},
+            )
+
+    if body.depot is not None:
+        depot_lat = body.depot.get("lat")
+        depot_lng = body.depot.get("lng")
+        if depot_lat is None or depot_lng is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_INPUT", "message": "depot must have lat and lng"},
+            )
+        depot_coords = (float(depot_lat), float(depot_lng))
+    else:
+        depot_coords = _DEFAULT_DEPOT
+        logger.info("No depot provided, using default Kyiv depot %s", depot_coords)
 
     try:
         result = await asyncio.to_thread(
-            _recalculate_sync, body.routes, (depot_lat, depot_lng), courier_start_min
+            _recalculate_sync, body.routes, depot_coords, courier_start_min
         )
     except HTTPException:
         raise
