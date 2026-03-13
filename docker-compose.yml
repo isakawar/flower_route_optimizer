@@ -1,33 +1,50 @@
 services:
 
-  # ── OSRM self-hosted routing engine ──────────────────────────────────────────
-  # First start: downloads Ukraine OSM (~400 MB) and preprocesses the graph.
-  # Subsequent starts: data is already in the volume — router starts in seconds.
+  # ── OSRM: step 1 — download Ukraine OSM data (runs once, alpine has curl) ────
+  osrm-init:
+    image: alpine:3
+    restart: "no"
+    volumes:
+      - osrm_data:/data
+    command: >
+      sh -c "
+        if [ ! -f /data/ukraine-latest.osm.pbf ] && [ ! -f /data/ukraine-latest.osrm ]; then
+          apk add --no-cache curl &&
+          echo 'Downloading Ukraine OSM data (~400 MB)...' &&
+          curl -L -o /data/ukraine-latest.osm.pbf https://download.geofabrik.de/europe/ukraine-latest.osm.pbf &&
+          echo 'Download complete.'
+        else
+          echo 'OSM data already present, skipping download.'
+        fi
+      "
+
+  # ── OSRM: step 2 — preprocess graph + run router ─────────────────────────────
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:v5.27.1
     restart: unless-stopped
     volumes:
       - osrm_data:/data
+    depends_on:
+      osrm-init:
+        condition: service_completed_successfully
     entrypoint: >
       sh -c "
         if [ ! -f /data/ukraine-latest.osrm ]; then
-          echo 'Downloading Ukraine OSM data...' &&
-          wget -q -O /data/ukraine-latest.osm.pbf https://download.geofabrik.de/europe/ukraine-latest.osm.pbf &&
-          echo 'Preprocessing OSRM graph (this takes ~3-5 min)...' &&
+          echo 'Preprocessing OSRM graph (3-5 min)...' &&
           osrm-extract -p /opt/car.lua /data/ukraine-latest.osm.pbf &&
           osrm-partition /data/ukraine-latest.osrm &&
           osrm-customize /data/ukraine-latest.osrm &&
-          rm /data/ukraine-latest.osm.pbf &&
+          rm -f /data/ukraine-latest.osm.pbf &&
           echo 'OSRM graph ready.'
         fi &&
         osrm-routed --algorithm mld /data/ukraine-latest.osrm --port 5000 --max-table-size 1000
       "
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/health || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/5000' || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 600s  # allow up to 10 min for first-run graph build
+      start_period: 600s
 
   # ── Redis (geocoding cache) ───────────────────────────────────────────────────
   redis:
