@@ -9,15 +9,17 @@ services:
     command: >
       osrm-routed
       --algorithm mld
-      /data/ukraine-latest.osrm
       --port 5000
-      --max-table-size 1000
+      --max-table-size 10000
+      --max-matching-size 1000
+      --threads 4
+      /data/ukraine-latest.osrm
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/5000' || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 120s
 
   redis:
     image: redis:7-alpine
