@@ -82,7 +82,7 @@ def solve_vrptw(
     """
     if not time_matrix or not time_windows:
         logger.warning("VRPTW: empty input")
-        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)], []
+        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)], [], []
 
     num_locations = len(time_matrix)
     if len(time_windows) != num_locations:
@@ -94,8 +94,12 @@ def solve_vrptw(
 
     _log_matrix_stats(time_matrix, distance_matrix)
 
-    # Max waiting time at any stop before service starts
-    slack_max = max_wait_min
+    # Allow unlimited slack so couriers can depart at any time >= courier_start_time.
+    # Waiting is penalised by SetSlackCostCoefficientForAllVehicles, and route duration
+    # is capped by SetSpanUpperBoundForVehicle — both prevent gratuitous idling.
+    # (Previously slack_max = max_wait_min which also capped the depot delay, making
+    # flexible departure impossible for late time-window stops.)
+    slack_max = MINUTES_PER_DAY
 
     # Open-route: add a virtual end node so couriers do not need to return to depot.
     # Travel cost from any node to dummy_end is 0 (no return leg in objective).
@@ -171,7 +175,7 @@ def solve_vrptw(
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetRange(tw_min, tw_max)
 
-    # Allow any stop to be dropped rather than violating max_wait_min.
+    # Allow any stop to be dropped if its time window is truly unreachable.
     # High penalty ensures the solver only drops as a last resort.
     _DROP_PENALTY = 10_000_000
     for location_idx in range(1, num_locations):  # skip depot (0)
