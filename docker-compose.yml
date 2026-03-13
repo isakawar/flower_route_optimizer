@@ -21,7 +21,7 @@ services:
     image: flower-optimizer-backend:latest
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       REDIS_URL: redis://redis:6379
     env_file:

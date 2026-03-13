@@ -16,7 +16,7 @@ services:
     image: ${BACKEND_IMAGE:-ghcr.io/isakawar/flower-route-optimizer-backend:latest}
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8001:8001"
     environment:
       REDIS_URL: redis://redis:6379
     env_file:
