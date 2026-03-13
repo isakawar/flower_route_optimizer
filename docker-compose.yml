@@ -2,7 +2,7 @@
 services:
 
   osrm:
-    image: ghcr.io/project-osrm/osrm-backend:v5.27.1
+    image: ghcr.io/project-osrm/osrm-backend:v6.0.0
     restart: unless-stopped
     volumes:
       - osrm_data:/data
