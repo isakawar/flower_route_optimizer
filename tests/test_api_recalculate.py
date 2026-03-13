@@ -197,21 +197,23 @@ class TestTimingRecomputed:
 # ---------------------------------------------------------------------------
 
 class TestRecalculateErrors:
-    def test_empty_routes_returns_400(self, client):
+    def test_empty_routes_returns_422(self, client):
         resp = _post(client, {"routes": [], "depot": DEPOT, "startTime": "09:00"})
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
-    def test_all_empty_stops_returns_400(self, client):
+    def test_all_empty_stops_returns_422(self, client):
         body = {
             "routes": [{"courierId": 1, "stops": []}],
             "depot": DEPOT,
             "startTime": "09:00",
         }
         resp = _post(client, body)
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
-    def test_missing_depot_returns_422(self, client):
+    def test_missing_depot_uses_default_kyiv(self, client):
+        # depot is optional — omitting it falls back to the default Kyiv depot
         body = {"routes": [{"courierId": 1, "stops": ROUTE_1_STOPS}], "startTime": "09:00"}
         with patch("main.build_time_matrix", make_matrix_mock()):
             resp = client.post("/api/recalculate", json=body)
-        assert resp.status_code == 422
+        assert resp.status_code == 200
+        assert resp.json()["depot"]["lat"] == 50.4422

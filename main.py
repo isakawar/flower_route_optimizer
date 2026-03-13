@@ -181,19 +181,23 @@ def _optimize_sync(
     if not office_coords:
         raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
 
-    dropped_orders = 0
-    for order in orders:
+    def _geocode_order(order):
         addr = f"{order.city}, {order.address} {order.house}, Ukraine"
         try:
-            coords = geocoder.geocode(addr)
+            return geocoder.geocode(addr)
         except Exception as exc:
             logger.warning("Order %s geocoding exception: %s — dropping", order.id, exc)
-            dropped_orders += 1
-            continue
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(10, len(orders))) as ex:
+        geo_results = list(ex.map(_geocode_order, orders))
+
+    dropped_orders = 0
+    for order, coords in zip(orders, geo_results):
         if coords:
             order.lat, order.lng = coords
         else:
-            logger.warning("Order %s dropped due to geocoding failure: %s", order.id, addr)
+            logger.warning("Order %s dropped due to geocoding failure", order.id)
             dropped_orders += 1
 
     geocoded = [o for o in orders if o.lat is not None]
@@ -390,32 +394,49 @@ def _recalculate_sync(
     total_drive_min = 0
     total_distance_km = 0.0
 
+    # Build ONE matrix for all unique coords across all couriers (was N matrices).
+    all_coords: list[tuple[float, float]] = [depot_coords]
+    for route in body_routes:
+        for s in route.stops:
+            coord = (s.lat, s.lng)
+            if coord not in all_coords:
+                all_coords.append(coord)
+
+    coord_to_idx = {c: i for i, c in enumerate(all_coords)}
+
+    logger.info("Building single OSRM matrix for %d coordinates (all couriers)", len(all_coords))
+    try:
+        time_matrix, distance_matrix = build_time_matrix(all_coords)
+    except Exception as exc:
+        logger.exception("Matrix build failed")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "OSRM_UNAVAILABLE", "message": f"OSRM matrix build failed: {exc}"},
+        ) from exc
+
+    geo_coords_per_route: list[list[tuple[float, float]]] = []
+
     for route in body_routes:
         if not route.stops:
             continue
 
         courier_stops = route.stops
-        courier_coords = [depot_coords] + [(s.lat, s.lng) for s in courier_stops]
-
-        logger.info("Building OSRM matrix for %d coordinates", len(courier_coords))
-        try:
-            time_matrix, distance_matrix = build_time_matrix(courier_coords)
-        except Exception as exc:
-            logger.exception("Matrix build failed for courier %d", route.courierId)
-            raise HTTPException(
-                status_code=503,
-                detail={"error": "OSRM_UNAVAILABLE", "message": f"OSRM matrix build failed: {exc}"},
-            ) from exc
-
         stops_out = []
         current_time = courier_start_min
         route_distance_m = 0.0
+        prev_coord = depot_coords
 
-        for i, stop in enumerate(courier_stops):
-            from_node = i
-            to_node = i + 1
-            drive_min = int(round(time_matrix[from_node][to_node] / 60))
-            route_distance_m += distance_matrix[from_node][to_node]
+        for stop in courier_stops:
+            stop_coord = (stop.lat, stop.lng)
+            from_idx = coord_to_idx[prev_coord]
+            to_idx = coord_to_idx.get(stop_coord)
+
+            if to_idx is None:
+                logger.warning("Stop coord %s not found in matrix — skipping", stop_coord)
+                continue
+
+            drive_min = int(round(time_matrix[from_idx][to_idx] / 60))
+            route_distance_m += distance_matrix[from_idx][to_idx]
             natural_arrival = current_time + drive_min
 
             tw_s = _parse_minutes(stop.timeStart)
@@ -441,24 +462,31 @@ def _recalculate_sync(
             })
 
             current_time = eta_min + SERVICE_TIME_PER_STOP
+            prev_coord = stop_coord
 
         route_drive_min = sum(s["driveMin"] for s in stops_out)
         route_distance_km = route_distance_m / 1000
 
-        geo_coords = [depot_coords] + [(s.lat, s.lng) for s in courier_stops]
-        geometry = fetch_route_geometry(geo_coords)
+        geo_coords_per_route.append([depot_coords] + [(s.lat, s.lng) for s in courier_stops])
 
         result_routes.append({
             "courierId": route.courierId,
             "stops": stops_out,
             "totalDriveMin": route_drive_min,
             "totalDistanceKm": round(route_distance_km, 2),
-            "geometry": geometry,
+            "geometry": None,  # filled below
         })
 
         total_deliveries += len(stops_out)
         total_drive_min += route_drive_min
         total_distance_km += route_distance_km
+
+    # Fetch all geometries in parallel (was sequential per courier).
+    if geo_coords_per_route:
+        with ThreadPoolExecutor(max_workers=len(geo_coords_per_route)) as executor:
+            geometries = list(executor.map(fetch_route_geometry, geo_coords_per_route))
+        for i, geom in enumerate(geometries):
+            result_routes[i]["geometry"] = geom
 
     return {
         "routes": result_routes,
