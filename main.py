@@ -3,6 +3,7 @@
 import asyncio
 import csv as _csv
 import io
+import json as _json
 import logging
 import math
 import os
@@ -22,6 +23,20 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+try:
+    from redis import Redis as _SyncRedis
+    from rq import Queue as _RQueue, get_current_job as _get_current_job
+    from rq.job import Job as _Job, NoSuchJobError as _NoSuchJobError
+
+    _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    _rq_redis = _SyncRedis.from_url(_REDIS_URL, socket_connect_timeout=2)
+    _rq_queue: "_RQueue | None" = _RQueue(connection=_rq_redis)
+except Exception as _rq_err:
+    _rq_queue = None
+    _rq_redis = None
+    _get_current_job = lambda: None  # type: ignore[assignment]
+    logging.getLogger(__name__).warning("RQ unavailable, will run synchronously: %s", _rq_err)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -137,6 +152,21 @@ def _fmt_time(minutes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# RQ progress helper
+# ---------------------------------------------------------------------------
+
+def _report_step(step_id: str) -> None:
+    """Store current progress step in RQ job meta (no-op when not in a worker)."""
+    try:
+        job = _get_current_job()
+        if job:
+            job.meta["currentStep"] = step_id
+            job.save_meta()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Synchronous optimization pipeline (runs in a thread pool via asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
@@ -179,6 +209,7 @@ def _optimize_sync(
         raise HTTPException(status_code=400, detail=f"Invalid start_time: {start_time!r}")
 
     # 2. Geocode
+    _report_step("geocode")
     geocoder = GeocodingService()
 
     try:
@@ -218,6 +249,7 @@ def _optimize_sync(
     geocoded.sort(key=lambda o: math.atan2(o.lat - depot_lat, o.lng - depot_lng))
 
     # 3. Build matrices (called exactly once)
+    _report_step("matrix")
     coords = [office_coords] + [(o.lat, o.lng) for o in geocoded]
     logger.info("Building OSRM matrix for %d coordinates", len(coords))
     try:
@@ -279,6 +311,7 @@ def _optimize_sync(
         logger.info("KMeans cluster %d: %d stops — nodes %s", ci + 1, len(r), r)
 
     # 7. Solve
+    _report_step("optimize")
     try:
         routes, solver_etas, dropped_nodes, solver_departures = solve_vrptw(
             time_matrix,
@@ -310,6 +343,7 @@ def _optimize_sync(
         )
 
     # 8. Build response (geometry fetched in parallel after the main loop)
+    _report_step("finalize")
     result_routes = []
     geo_coords_per_route: list[list[tuple[float, float]]] = []
     total_deliveries = 0
@@ -635,8 +669,19 @@ async def optimize(
     capacity: int | None = Form(None),
     time_buffer_min: int = Form(15),
 ):
-    # Read file content here (async-safe); everything else runs in a thread.
     raw = await file.read()
+
+    if _rq_queue is not None:
+        # Async path: enqueue job and return jobId immediately.
+        job = _rq_queue.enqueue(
+            _optimize_sync,
+            raw, start_time, num_couriers, capacity, time_buffer_min,
+            job_timeout=600,
+            result_ttl=3600,
+        )
+        return {"jobId": job.id, "status": "pending"}
+
+    # Sync fallback when Redis/RQ unavailable (local dev without Docker).
     try:
         result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity, time_buffer_min)
     except HTTPException:
@@ -648,7 +693,43 @@ async def optimize(
     if result.get("__infeasible__"):
         return JSONResponse(status_code=422, content={k: v for k, v in result.items() if k != "__infeasible__"})
 
-    return result
+    # Wrap as a "done" job response so the frontend polling logic still works.
+    return {"jobId": "sync", "status": "done", "result": result}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    if _rq_redis is None:
+        raise HTTPException(status_code=503, detail="Job queue unavailable")
+
+    try:
+        job = _Job.fetch(job_id, connection=_rq_redis)
+    except _NoSuchJobError:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = job.get_status()
+    status_str = status.value if hasattr(status, "value") else str(status)
+
+    if status_str == "finished":
+        result = job.result
+        if isinstance(result, dict) and result.get("__infeasible__"):
+            return JSONResponse(
+                status_code=422,
+                content={k: v for k, v in result.items() if k != "__infeasible__"},
+            )
+        return {"status": "done", "result": result}
+
+    if status_str == "failed":
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": str(job.exc_info)},
+        )
+
+    step = job.meta.get("currentStep") if job.meta else None
+    return {
+        "status": "running" if status_str == "started" else "pending",
+        "progress": {"currentStep": step} if step else None,
+    }
 
 
 @app.post("/api/optimize/json")

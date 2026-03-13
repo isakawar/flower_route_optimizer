@@ -1,11 +1,23 @@
 """Build distance/time matrix using OSRM Table API with Haversine fallback."""
 
+import hashlib
+import json
 import logging
 import math
 import os
 import time
 
 import requests
+
+try:
+    from redis import Redis as _Redis
+    _REDIS_URL = os.getenv("REDIS_URL", "")
+    _redis: "_Redis | None" = (
+        _Redis.from_url(_REDIS_URL, socket_connect_timeout=2, decode_responses=True)
+        if _REDIS_URL else None
+    )
+except Exception:
+    _redis = None
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +90,16 @@ def _osrm_request(
     raise last_exc  # type: ignore[misc]
 
 
+# ── Redis matrix cache ────────────────────────────────────────────────────────
+
+_MATRIX_CACHE_TTL = 7 * 24 * 3600  # 7 days — road speeds rarely change
+
+
+def _matrix_cache_key(coordinates: list[tuple[float, float]]) -> str:
+    payload = json.dumps(coordinates, separators=(",", ":"))
+    return "matrix:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def build_time_matrix(
@@ -87,8 +109,9 @@ def build_time_matrix(
     """
     Build time and distance matrices between all pairs of coordinates.
 
-    Tries OSRM Table API first (up to _RETRIES attempts).
+    Tries Redis cache first, then OSRM Table API (up to _RETRIES attempts).
     Falls back to Haversine straight-line estimates if OSRM is unavailable.
+    Haversine results are NOT cached (they are approximations).
 
     Args:
         coordinates: List of (lat, lng) pairs.
@@ -99,6 +122,18 @@ def build_time_matrix(
     """
     if not coordinates:
         return [], []
+
+    # Cache lookup
+    cache_key = _matrix_cache_key(coordinates)
+    if _redis:
+        try:
+            cached = _redis.get(cache_key)
+            if cached:
+                data = json.loads(cached)
+                logger.info("Matrix cache hit (%d coords)", len(coordinates))
+                return data["durations"], data["distances"]
+        except Exception as exc:
+            logger.warning("Matrix cache read failed: %s", exc)
 
     coord_str = ";".join(f"{lon},{lat}" for lat, lon in coordinates)
     base_url = OSRM_TABLE_URL.replace("driving", profile)
@@ -147,5 +182,12 @@ def build_time_matrix(
                 "OSRM distances (m): min=%.0f max=%.0f avg=%.0f",
                 min(dists_flat), max(dists_flat), sum(dists_flat) / len(dists_flat),
             )
+
+    # Store in cache (only real OSRM results, not Haversine fallback)
+    if _redis:
+        try:
+            _redis.setex(cache_key, _MATRIX_CACHE_TTL, json.dumps({"durations": durations, "distances": distances}))
+        except Exception as exc:
+            logger.warning("Matrix cache write failed: %s", exc)
 
     return durations, distances

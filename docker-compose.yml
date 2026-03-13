@@ -1,28 +1,39 @@
-
 services:
 
+  # ── OSRM: download + preprocess once, then run router ────────────────────────
+  # A sentinel file /data/.osrm_ready is created after successful preprocessing.
+  # On restart, the sentinel is present so the container skips directly to routing.
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:v6.0.0
     restart: unless-stopped
     volumes:
       - osrm_data:/data
-    ports:
-      - "5000:5000"
-    command: >
-      osrm-routed
-      --algorithm mld
-      --port 5000
-      --max-table-size 10000
-      --max-matching-size 1000
-      --threads 4
-      /data/kyiv-region.osrm
+    entrypoint: >
+      sh -c "
+        if [ ! -f /data/.osrm_ready ]; then
+          if [ ! -f /data/ukraine-latest.osm.pbf ]; then
+            echo 'Downloading Ukraine OSM data (~400 MB)...' &&
+            wget -O /data/ukraine-latest.osm.pbf https://download.geofabrik.de/europe/ukraine-latest.osm.pbf &&
+            echo 'Download complete.'
+          fi &&
+          echo 'Preprocessing OSRM graph (3-5 min)...' &&
+          osrm-extract -p /opt/car.lua /data/ukraine-latest.osm.pbf &&
+          osrm-partition /data/ukraine-latest.osrm &&
+          osrm-customize /data/ukraine-latest.osrm &&
+          rm -f /data/ukraine-latest.osm.pbf &&
+          touch /data/.osrm_ready &&
+          echo 'OSRM graph ready.'
+        fi &&
+        osrm-routed --algorithm mld /data/ukraine-latest.osrm --port 5000 --max-table-size 1000
+      "
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/5000' || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:5000/nearest/v1/driving/30.52,50.45' > /dev/null 2>&1"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 600s
 
+  # ── Redis (geocoding cache) ───────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -35,6 +46,7 @@ services:
       timeout: 5s
       retries: 3
 
+  # ── Python / FastAPI backend ──────────────────────────────────────────────────
   backend:
     build:
       context: .
@@ -47,13 +59,15 @@ services:
       REDIS_URL: redis://redis:6379
       OSRM_URL: http://osrm:5000/table/v1/driving
     env_file:
+      # Create a .env file with secrets (GOOGLE_MAPS_API_KEY, etc.).
+      # The file is optional — the service starts without it.
       - path: .env
         required: false
     depends_on:
       redis:
         condition: service_healthy
       osrm:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -65,6 +79,26 @@ services:
       retries: 3
       start_period: 40s
 
+  # ── RQ worker (background optimization jobs) ─────────────────────────────────
+  rq-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python worker.py
+    environment:
+      REDIS_URL: redis://redis:6379
+      OSRM_URL: http://osrm:5000/table/v1/driving
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      redis:
+        condition: service_healthy
+      osrm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Next.js frontend ──────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -79,8 +113,10 @@ services:
       BACKEND_URL: http://backend:8000
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
+  # Redis RDB snapshot — geocodes survive container restarts
   redis_data:
+  # OSRM preprocessed Ukraine road graph — persists across container restarts
   osrm_data:

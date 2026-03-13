@@ -129,19 +129,14 @@ def solve_vrptw(
 
     transit_callback_index = routing.RegisterTransitCallback(time_callback)
 
-    # --- Arc cost: distance in meters (geographic efficiency) or fallback to time ---
-    if extended_dist is not None:
-        def distance_callback(from_index: int, to_index: int) -> int:
-            from_node = manager.IndexToNode(from_index)
-            to_node = manager.IndexToNode(to_index)
-            return int(round(extended_dist[from_node][to_node]))
-
-        dist_callback_index = routing.RegisterTransitCallback(distance_callback)
-        routing.SetArcCostEvaluatorOfAllVehicles(dist_callback_index)
-        logger.info("VRPTW: using distance-based arc cost (meters)")
-    else:
-        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
-        logger.info("VRPTW: using time-based arc cost (fallback)")
+    # --- Arc cost: time in minutes ---
+    # Using time-based arc cost keeps all solver costs in consistent units (minutes),
+    # which is required for the soft drop-penalty logic to work correctly:
+    # DROP_PENALTY = WAIT_COST_COEFF × max_wait_min (e.g. 1000 min-equivalent units).
+    # Distance-based arc costs (meters) would dwarf the drop penalty, causing all
+    # stops to be dropped.  Distance is still logged for diagnostics.
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+    logger.info("VRPTW: using time-based arc cost (minutes)")
 
     # --- Time dimension ---
     routing.AddDimension(
@@ -175,9 +170,15 @@ def solve_vrptw(
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetRange(tw_min, tw_max)
 
-    # Allow any stop to be dropped if its time window is truly unreachable.
-    # High penalty ensures the solver only drops as a last resort.
-    _DROP_PENALTY = 10_000_000
+    # Soft max-wait enforcement:
+    # Cost of waiting 1 min = WAIT_COST_COEFF units.
+    # Drop penalty = WAIT_COST_COEFF × max_wait_min  →  if a stop requires
+    # more than max_wait_min of idle time, dropping it is cheaper than keeping
+    # it, so the solver drops it and main.py assigns a solo courier instead.
+    # (A hard slack_max would also cap depot departure delay, breaking flexible
+    # departure for late time-window stops — so we use soft enforcement here.)
+    _WAIT_COST_COEFF = 50
+    _DROP_PENALTY = _WAIT_COST_COEFF * max_wait_min
     for location_idx in range(1, num_locations):  # skip depot (0)
         routing.AddDisjunction(
             [manager.NodeToIndex(location_idx)],
@@ -185,7 +186,7 @@ def solve_vrptw(
         )
 
     # Penalise waiting: slack = idle time at each node before service.
-    time_dimension.SetSlackCostCoefficientForAllVehicles(5)
+    time_dimension.SetSlackCostCoefficientForAllVehicles(_WAIT_COST_COEFF)
 
     # Finaliser: minimise both departure and finish time per courier.
     # Minimising start pushes early-window couriers to depart promptly;

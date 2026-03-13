@@ -12,10 +12,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── dependency layer (cached unless requirements-prod.txt changes) ────────────
-COPY requirements-prod.txt ./
+# ── dependency layer (cached unless requirements.txt changes) ─────────────────
+COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements-prod.txt
+    && pip install --no-cache-dir -r requirements.txt
 
 # ── application source ────────────────────────────────────────────────────────
 # .dockerignore excludes venv/, tests/, frontend/, __pycache__, .git, etc.
