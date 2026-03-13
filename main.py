@@ -40,7 +40,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEPOT_ADDRESS = "вулиця Нагірна, 18, Київ, Ukraine"
-SERVICE_TIME_PER_STOP = 3  # minutes
+SERVICE_TIME_PER_STOP = 15  # minutes (drive to door, hand over, sign)
+MAX_ROUTE_DURATION_MIN = 3 * 60  # 3h max per route — flower freshness + courier shift
 OSRM_ROUTE_URL = os.getenv("OSRM_URL", "http://router.project-osrm.org/table/v1/driving").replace(
     "/table/v1/", "/route/v1/"
 )
@@ -142,17 +143,23 @@ def _fmt_time(minutes: int) -> str:
 def _optimize_sync(
     raw: bytes,
     start_time: str,
-    num_couriers: int,
+    num_couriers: int | None,
     capacity: int | None,
+    time_buffer_min: int = 0,
 ) -> dict:
     """
     Full blocking pipeline: CSV → geocode → matrix → solve → build response.
     Must NOT be called directly from an async context — use asyncio.to_thread().
+
+    num_couriers=None → auto-calculate minimum required couriers.
+    time_buffer_min   → subtract this many minutes from every delivery window end
+                        so the solver never plans a delivery that arrives too close
+                        to the deadline (e.g. 17:55 when window closes at 18:00).
     """
     t_start = time.monotonic()
     logger.info(
-        "Optimization pipeline started: couriers=%d, start_time=%s, capacity=%s",
-        num_couriers, start_time, capacity,
+        "Optimization pipeline started: couriers=%s, start_time=%s, capacity=%s, buffer=%dmin",
+        num_couriers, start_time, capacity, time_buffer_min,
     )
 
     # 1. Parse CSV
@@ -181,19 +188,23 @@ def _optimize_sync(
     if not office_coords:
         raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
 
-    dropped_orders = 0
-    for order in orders:
+    def _geocode_order(order):
         addr = f"{order.city}, {order.address} {order.house}, Ukraine"
         try:
-            coords = geocoder.geocode(addr)
+            return geocoder.geocode(addr)
         except Exception as exc:
             logger.warning("Order %s geocoding exception: %s — dropping", order.id, exc)
-            dropped_orders += 1
-            continue
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(10, len(orders))) as ex:
+        geo_results = list(ex.map(_geocode_order, orders))
+
+    dropped_orders = 0
+    for order, coords in zip(orders, geo_results):
         if coords:
             order.lat, order.lng = coords
         else:
-            logger.warning("Order %s dropped due to geocoding failure: %s", order.id, addr)
+            logger.warning("Order %s dropped due to geocoding failure", order.id)
             dropped_orders += 1
 
     geocoded = [o for o in orders if o.lat is not None]
@@ -215,26 +226,36 @@ def _optimize_sync(
         logger.exception("Matrix build failed")
         raise HTTPException(status_code=500, detail=f"Matrix build failed: {exc}") from exc
 
-    # 4. Time windows
+    # 4. Time windows (apply buffer: shorten window end by time_buffer_min)
     time_windows: list[tuple[int, int]] = [(courier_start_min, MINUTES_PER_DAY)]
     for order in geocoded:
         tw_s = _parse_minutes(order.time_start)
         tw_e = _parse_minutes(order.time_end)
         if tw_s is not None and tw_e is not None and tw_s <= tw_e:
-            time_windows.append((tw_s, tw_e))
+            tw_e_effective = tw_e - time_buffer_min
+            if tw_e_effective <= tw_s:
+                tw_e_effective = tw_e  # buffer too large — ignore it for this stop
+            time_windows.append((tw_s, tw_e_effective))
         else:
             time_windows.append((0, MINUTES_PER_DAY))
 
-    # 5. Feasibility check
+    # 5. Feasibility check + auto num_couriers
     cap_required = capacity_minimum_couriers(len(geocoded), capacity) if capacity else 1
     tw_required = estimate_minimum_couriers(
-        time_windows, time_matrix, SERVICE_TIME_PER_STOP, courier_start_min
+        time_windows, time_matrix, SERVICE_TIME_PER_STOP, courier_start_min,
+        max_route_duration_min=MAX_ROUTE_DURATION_MIN,
     )
     minimum_required = max(cap_required, tw_required)
 
-    if num_couriers < minimum_required:
+    auto_couriers = num_couriers is None
+    if auto_couriers:
+        num_couriers = minimum_required
+        logger.info(
+            "Auto num_couriers = %d (cap=%d, tw_or_duration=%d)",
+            num_couriers, cap_required, tw_required,
+        )
+    elif num_couriers < minimum_required:
         reason = "capacity_constraint" if cap_required >= tw_required else "time_window_constraint"
-        # Return a special sentinel so the async wrapper can return a JSONResponse
         return {
             "__infeasible__": True,
             "error": "INFEASIBLE",
@@ -259,7 +280,7 @@ def _optimize_sync(
 
     # 7. Solve
     try:
-        routes, _ = solve_vrptw(
+        routes, solver_etas, dropped_nodes, solver_departures = solve_vrptw(
             time_matrix,
             time_windows,
             depot=0,
@@ -269,13 +290,24 @@ def _optimize_sync(
             capacity=capacity,
             initial_routes=initial_routes,
             distance_matrix=distance_matrix,
+            max_wait_min=20,
+            max_route_duration_min=MAX_ROUTE_DURATION_MIN,
         )
     except Exception as exc:
         logger.exception("Solver crashed")
         raise HTTPException(status_code=500, detail=f"Solver error: {exc}") from exc
 
-    if all(len(r) == 0 for r in routes):
+    if all(len(r) == 0 for r in routes) and not dropped_nodes:
         raise HTTPException(status_code=500, detail="Solver found no feasible solution")
+
+    # Dropped stops: each gets a dedicated solo courier (departs exactly when needed)
+    for node in dropped_nodes:
+        routes.append([node])
+    if dropped_nodes:
+        logger.info(
+            "%d stop(s) could not be scheduled without >15 min wait → assigned as solo couriers",
+            len(dropped_nodes),
+        )
 
     # 8. Build response (geometry fetched in parallel after the main loop)
     result_routes = []
@@ -289,8 +321,24 @@ def _optimize_sync(
             continue
 
         stops = []
-        current_time = courier_start_min
         prev_node = 0
+
+        # Use actual departure time from solver when available (v < num solver couriers).
+        # Dropped solo couriers are appended after the solver routes, so derive their
+        # departure from the time window of their single stop.
+        if v < len(solver_departures):
+            departure_min = solver_departures[v]
+            v_etas = solver_etas[v]
+        else:
+            node = route_nodes[0]
+            order = geocoded[node - 1]
+            drive_from_depot = int(round(time_matrix[0][node] / 60))
+            tw_s = _parse_minutes(order.time_start)
+            eta_solo = max(courier_start_min + drive_from_depot, tw_s or 0)
+            departure_min = eta_solo - drive_from_depot
+            v_etas = [eta_solo]
+
+        current_time = departure_min
 
         prev_chain = [0] + list(route_nodes)
         route_distance_m = sum(
@@ -298,21 +346,20 @@ def _optimize_sync(
             for i in range(len(route_nodes))
         ) + distance_matrix[route_nodes[-1]][0]
 
-        for node in route_nodes:
+        for idx, node in enumerate(route_nodes):
             order = geocoded[node - 1]
             drive_min = int(round(time_matrix[prev_node][node] / 60))
-            natural_arrival = current_time + drive_min
 
-            tw_s = _parse_minutes(order.time_start)
-            tw_e = _parse_minutes(order.time_end)
-            has_window = tw_s is not None and tw_e is not None
-
-            if has_window and natural_arrival < tw_s:
-                wait_min = tw_s - natural_arrival
-                eta_min = tw_s
+            # Use solver ETA when available; otherwise simulate from current_time.
+            if idx < len(v_etas):
+                eta_min = v_etas[idx]
             else:
-                wait_min = 0
-                eta_min = natural_arrival
+                tw_s = _parse_minutes(order.time_start)
+                natural_arrival = current_time + drive_min
+                eta_min = max(natural_arrival, tw_s) if tw_s else natural_arrival
+
+            arrival = current_time + drive_min
+            wait_min = max(0, eta_min - arrival)
 
             stops.append({
                 "address": f"{order.city}, {order.address} {order.house}",
@@ -331,6 +378,8 @@ def _optimize_sync(
         route_drive_min = sum(s["driveMin"] for s in stops)
         route_distance_km = route_distance_m / 1000
 
+        suggested_departure = _fmt_time(departure_min)
+
         geo_coords = (
             [office_coords]
             + [(geocoded[n - 1].lat, geocoded[n - 1].lng) for n in route_nodes]
@@ -342,6 +391,7 @@ def _optimize_sync(
             "stops": stops,
             "totalDriveMin": route_drive_min,
             "totalDistanceKm": round(route_distance_km, 2),
+            "suggestedDepartureTime": suggested_departure,
             "geometry": None,  # filled below
         })
 
@@ -369,6 +419,9 @@ def _optimize_sync(
             "totalDriveMin": total_drive_min,
             "totalDistanceKm": round(total_distance_km, 2),
             "numCouriers": len(result_routes),
+            "autoCouriers": auto_couriers,
+            "serviceTimePerStop": SERVICE_TIME_PER_STOP,
+            "timeBufferMin": time_buffer_min,
         },
         "depot": {
             "lat": office_coords[0],
@@ -390,29 +443,49 @@ def _recalculate_sync(
     total_drive_min = 0
     total_distance_km = 0.0
 
+    # Build ONE matrix for all unique coords across all couriers (was N matrices).
+    all_coords: list[tuple[float, float]] = [depot_coords]
+    for route in body_routes:
+        for s in route.stops:
+            coord = (s.lat, s.lng)
+            if coord not in all_coords:
+                all_coords.append(coord)
+
+    coord_to_idx = {c: i for i, c in enumerate(all_coords)}
+
+    logger.info("Building single OSRM matrix for %d coordinates (all couriers)", len(all_coords))
+    try:
+        time_matrix, distance_matrix = build_time_matrix(all_coords)
+    except Exception as exc:
+        logger.exception("Matrix build failed")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "OSRM_UNAVAILABLE", "message": f"OSRM matrix build failed: {exc}"},
+        ) from exc
+
+    geo_coords_per_route: list[list[tuple[float, float]]] = []
+
     for route in body_routes:
         if not route.stops:
             continue
 
         courier_stops = route.stops
-        courier_coords = [depot_coords] + [(s.lat, s.lng) for s in courier_stops]
-
-        logger.info("Building OSRM matrix for %d coordinates", len(courier_coords))
-        try:
-            time_matrix, distance_matrix = build_time_matrix(courier_coords)
-        except Exception as exc:
-            logger.exception("Matrix build failed for courier %d", route.courierId)
-            raise HTTPException(status_code=500, detail=f"Matrix build failed: {exc}") from exc
-
         stops_out = []
         current_time = courier_start_min
         route_distance_m = 0.0
+        prev_coord = depot_coords
 
-        for i, stop in enumerate(courier_stops):
-            from_node = i
-            to_node = i + 1
-            drive_min = int(round(time_matrix[from_node][to_node] / 60))
-            route_distance_m += distance_matrix[from_node][to_node]
+        for stop in courier_stops:
+            stop_coord = (stop.lat, stop.lng)
+            from_idx = coord_to_idx[prev_coord]
+            to_idx = coord_to_idx.get(stop_coord)
+
+            if to_idx is None:
+                logger.warning("Stop coord %s not found in matrix — skipping", stop_coord)
+                continue
+
+            drive_min = int(round(time_matrix[from_idx][to_idx] / 60))
+            route_distance_m += distance_matrix[from_idx][to_idx]
             natural_arrival = current_time + drive_min
 
             tw_s = _parse_minutes(stop.timeStart)
@@ -438,24 +511,31 @@ def _recalculate_sync(
             })
 
             current_time = eta_min + SERVICE_TIME_PER_STOP
+            prev_coord = stop_coord
 
         route_drive_min = sum(s["driveMin"] for s in stops_out)
         route_distance_km = route_distance_m / 1000
 
-        geo_coords = [depot_coords] + [(s.lat, s.lng) for s in courier_stops]
-        geometry = fetch_route_geometry(geo_coords)
+        geo_coords_per_route.append([depot_coords] + [(s.lat, s.lng) for s in courier_stops])
 
         result_routes.append({
             "courierId": route.courierId,
             "stops": stops_out,
             "totalDriveMin": route_drive_min,
             "totalDistanceKm": round(route_distance_km, 2),
-            "geometry": geometry,
+            "geometry": None,  # filled below
         })
 
         total_deliveries += len(stops_out)
         total_drive_min += route_drive_min
         total_distance_km += route_distance_km
+
+    # Fetch all geometries in parallel (was sequential per courier).
+    if geo_coords_per_route:
+        with ThreadPoolExecutor(max_workers=len(geo_coords_per_route)) as executor:
+            geometries = list(executor.map(fetch_route_geometry, geo_coords_per_route))
+        for i, geom in enumerate(geometries):
+            result_routes[i]["geometry"] = geom
 
     return {
         "routes": result_routes,
@@ -518,8 +598,9 @@ class OrderInput(BaseModel):
 class OptimizeJsonRequest(BaseModel):
     orders: list[OrderInput]
     start_time: str = "09:00"
-    num_couriers: int = 1
+    num_couriers: int | None = None   # None = auto-calculate minimum required
     capacity: int | None = None
+    time_buffer_min: int = 15         # minutes of buffer before window end (default 15)
 
 
 class RecalculateStop(BaseModel):
@@ -537,7 +618,7 @@ class RecalculateRoute(BaseModel):
 
 class RecalculateRequest(BaseModel):
     routes: list[RecalculateRoute]
-    depot: dict  # {"lat": float, "lng": float}
+    depot: dict | None = None  # {"lat": float, "lng": float}; None → default Kyiv depot
     startTime: str = "09:00"
 
 
@@ -550,13 +631,14 @@ def health():
 async def optimize(
     file: UploadFile = File(...),
     start_time: str = Form("09:00"),
-    num_couriers: int = Form(1),
+    num_couriers: int | None = Form(None),
     capacity: int | None = Form(None),
+    time_buffer_min: int = Form(15),
 ):
     # Read file content here (async-safe); everything else runs in a thread.
     raw = await file.read()
     try:
-        result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity)
+        result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity, time_buffer_min)
     except HTTPException:
         raise
     except Exception as exc:
@@ -604,7 +686,7 @@ async def optimize_json(
 
     try:
         result = await asyncio.to_thread(
-            _optimize_sync, raw, body.start_time, body.num_couriers, body.capacity
+            _optimize_sync, raw, body.start_time, body.num_couriers, body.capacity, body.time_buffer_min
         )
     except HTTPException:
         raise
@@ -618,23 +700,54 @@ async def optimize_json(
     return result
 
 
+_DEFAULT_DEPOT = (50.4422, 30.5367)  # Kyiv city center fallback
+
+
 @app.post("/api/recalculate")
-async def recalculate_routes(body: RecalculateRequest):
+async def recalculate_routes(
+    body: RecalculateRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    _check_api_key(x_api_key)
+
     if not body.routes or all(len(r.stops) == 0 for r in body.routes):
-        raise HTTPException(status_code=400, detail="No stops provided")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": "routes array is empty or has no stops"},
+        )
 
     courier_start_min = _parse_minutes(body.startTime)
     if courier_start_min is None:
-        raise HTTPException(status_code=400, detail=f"Invalid startTime: {body.startTime!r}")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": f"Invalid startTime: {body.startTime!r}"},
+        )
 
-    depot_lat = body.depot.get("lat")
-    depot_lng = body.depot.get("lng")
-    if depot_lat is None or depot_lng is None:
-        raise HTTPException(status_code=400, detail="depot must have lat and lng")
+    # Validate stops and drop those with missing coordinates
+    for route in body.routes:
+        invalid = [s for s in route.stops if s.lat is None or s.lng is None]
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_INPUT", "message": f"Courier {route.courierId}: {len(invalid)} stop(s) missing lat/lng"},
+            )
+
+    if body.depot is not None:
+        depot_lat = body.depot.get("lat")
+        depot_lng = body.depot.get("lng")
+        if depot_lat is None or depot_lng is None:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_INPUT", "message": "depot must have lat and lng"},
+            )
+        depot_coords = (float(depot_lat), float(depot_lng))
+    else:
+        depot_coords = _DEFAULT_DEPOT
+        logger.info("No depot provided, using default Kyiv depot %s", depot_coords)
 
     try:
         result = await asyncio.to_thread(
-            _recalculate_sync, body.routes, (depot_lat, depot_lng), courier_start_min
+            _recalculate_sync, body.routes, depot_coords, courier_start_min
         )
     except HTTPException:
         raise

@@ -25,7 +25,6 @@ export interface RecalculateRoute {
 export interface RecalculateParams {
   routes: RecalculateRoute[];
   depot: { lat: number; lng: number };
-  startTime: string;
 }
 
 export interface AddressSuggestion {
@@ -43,6 +42,7 @@ export interface CourierRoute {
   stops: DeliveryStop[];
   totalDriveMin: number;
   totalDistanceKm: number;
+  suggestedDepartureTime?: string | null; // "HH:MM" when courier should actually leave
   geometry?: [number, number][] | null; // [[lat, lng], ...] road path from OSRM
 }
 
@@ -61,9 +61,6 @@ export type AppState = "idle" | "loading" | "complete" | "error";
 
 export interface OptimizationParams {
   csvFile: File;
-  startTime: string; // "HH:MM"
-  numCouriers: number;
-  capacity: number;
 }
 
 export interface ProgressStep {

@@ -92,7 +92,7 @@ def test_all_stops_visited_exactly_once(data):
     n_stops = n - 1  # depot is node 0
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, etas = solve_vrptw(
+    routes, etas, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,
@@ -121,7 +121,7 @@ def test_no_duplicate_stops(data):
     t, n, n_couriers = data
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, _ = solve_vrptw(
+    routes, _, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,
@@ -144,7 +144,7 @@ def test_capacity_never_exceeded(data):
     t, n, n_couriers, cap = data
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, _ = solve_vrptw(
+    routes, _, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,
@@ -170,7 +170,7 @@ def test_etas_non_decreasing_per_courier(data):
     t, n, n_couriers = data
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, etas = solve_vrptw(
+    routes, etas, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,
@@ -200,7 +200,7 @@ def test_etas_not_before_start(data, start):
     t, n, n_couriers = data
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, etas = solve_vrptw(
+    routes, etas, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,
@@ -224,7 +224,7 @@ def test_result_has_n_courier_slots(data):
     t, n, n_couriers = data
     tw = [(0, MINUTES_PER_DAY)] * n
 
-    routes, etas = solve_vrptw(
+    routes, etas, _, _ = solve_vrptw(
         time_matrix=t,
         time_windows=tw,
         depot=0,

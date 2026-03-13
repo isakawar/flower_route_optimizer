@@ -1,15 +1,7 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import {
-  Upload,
-  Clock,
-  Users,
-  Package,
-  ChevronUp,
-  ChevronDown,
-  Flower2,
-} from "lucide-react";
+import { useState, useRef, useCallback } from "react";
+import { Upload, Flower2 } from "lucide-react";
 import type { OptimizationParams } from "@/types";
 
 interface Props {
@@ -17,75 +9,9 @@ interface Props {
   isLoading: boolean;
 }
 
-function NumberStepper({
-  value,
-  onChange,
-  min,
-  max,
-  label,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  min: number;
-  max: number;
-  label: string;
-}) {
-  const [raw, setRaw] = useState(String(value));
-
-  useEffect(() => {
-    setRaw(String(value));
-  }, [value]);
-
-  const commit = (s: string) => {
-    const v = parseInt(s);
-    if (!isNaN(v) && v >= min && v <= max) {
-      onChange(v);
-    } else {
-      setRaw(String(value)); // revert to last valid
-    }
-  };
-
-  return (
-    <div className="flex items-center gap-0 rounded-xl border border-border bg-bg-base overflow-hidden focus-within:border-rose-soft/40 transition-colors">
-      <input
-        type="number"
-        value={raw}
-        min={min}
-        max={max}
-        onChange={(e) => setRaw(e.target.value)}
-        onBlur={(e) => commit(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && commit(raw)}
-        aria-label={label}
-        className="flex-1 bg-transparent px-4 py-3 text-sm text-text-primary text-center
-                   outline-none placeholder-text-muted"
-      />
-      <div className="flex flex-col border-l border-border">
-        <button
-          type="button"
-          onClick={() => value < max && onChange(value + 1)}
-          className="px-2 py-1.5 text-text-secondary hover:text-rose-soft hover:bg-rose-glow transition-colors"
-          aria-label="Increase"
-        >
-          <ChevronUp size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={() => value > min && onChange(value - 1)}
-          className="px-2 py-1.5 text-text-secondary hover:text-rose-soft hover:bg-rose-glow transition-colors border-t border-border"
-          aria-label="Decrease"
-        >
-          <ChevronDown size={14} />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 export default function OptimizationPanel({ onSubmit, isLoading }: Props) {
   const [csvFile, setCsvFile] = useState<File | null>(null);
-  const [startTime, setStartTime] = useState("09:00");
-  const [numCouriers, setNumCouriers] = useState(3);
-  const [capacity, setCapacity] = useState(15);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -108,7 +34,7 @@ export default function OptimizationPanel({ onSubmit, isLoading }: Props) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!csvFile) return;
-    onSubmit({ csvFile, startTime, numCouriers, capacity });
+    onSubmit({ csvFile });
   };
 
   const canSubmit = !!csvFile && !isLoading;
@@ -226,56 +152,6 @@ export default function OptimizationPanel({ onSubmit, isLoading }: Props) {
                   <path d="M12 16v-4M12 8h.01" strokeLinecap="round" />
                 </svg>
                 <span>Очікувані колонки: city, address, house, delivery_window_start, delivery_window_end</span>
-              </div>
-            </div>
-
-            {/* Parameters grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {/* Start time */}
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">
-                  <Clock size={12} />
-                  Час старту
-                </label>
-                <input
-                  type="time"
-                  value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
-                  className="w-full rounded-xl border border-border bg-bg-base px-4 py-3
-                             text-sm text-text-primary outline-none
-                             focus:border-rose-soft/40 hover:border-border-accent
-                             transition-colors [color-scheme:dark]"
-                />
-              </div>
-
-              {/* Num couriers */}
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">
-                  <Users size={12} />
-                  Кількість кур'єрів
-                </label>
-                <NumberStepper
-                  value={numCouriers}
-                  onChange={setNumCouriers}
-                  min={1}
-                  max={20}
-                  label="Кількість кур'єрів"
-                />
-              </div>
-
-              {/* Capacity */}
-              <div>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-text-secondary uppercase tracking-wider mb-2">
-                  <Package size={12} />
-                  Місткість
-                </label>
-                <NumberStepper
-                  value={capacity}
-                  onChange={setCapacity}
-                  min={1}
-                  max={100}
-                  label="Місткість кур'єра"
-                />
               </div>
             </div>
 

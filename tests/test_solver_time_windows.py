@@ -37,6 +37,7 @@ class TestTimeWindowAdherence:
             courier_start_time=START,
             service_time_per_stop=3,
             num_couriers=n_couriers,
+            max_wait_min=MINUTES_PER_DAY,  # tests specifically check wait behaviour
         )
 
     def test_single_window_respected(self):
@@ -44,7 +45,7 @@ class TestTimeWindowAdherence:
         n = 3  # depot + 2 stops
         # Node 1: window 10:00–11:00 (600–660 min), Node 2: unconstrained
         windows = [NO_WINDOW, (600, 660), NO_WINDOW]
-        routes, etas = self._make_problem(n, windows)
+        routes, etas, _, _ = self._make_problem(n, windows)
 
         node_eta = dict(_all_stops_etas(routes, etas))
         assert 600 <= node_eta[1] <= 660
@@ -59,7 +60,7 @@ class TestTimeWindowAdherence:
             (780, 900),          # node 3: 13:00–15:00
             (840, 960),          # node 4: 14:00–16:00
         ]
-        routes, etas = self._make_problem(n, windows, n_couriers=2)
+        routes, etas, _, _ = self._make_problem(n, windows, n_couriers=2)
 
         node_eta = dict(_all_stops_etas(routes, etas))
         for node, (tw_start, tw_end) in enumerate(windows):
@@ -76,7 +77,7 @@ class TestTimeWindowAdherence:
         n = 2  # depot + 1 stop
         # Start at 09:00, window opens at 12:00 — courier must wait ~3h
         windows = [NO_WINDOW, (720, 840)]  # 12:00–14:00
-        routes, etas = self._make_problem(n, windows)
+        routes, etas, _, _ = self._make_problem(n, windows)
 
         node_eta = dict(_all_stops_etas(routes, etas))
         # ETA must be >= 720 (window open) even if travel takes only 10 min
@@ -86,7 +87,7 @@ class TestTimeWindowAdherence:
         """Wide (0, 1440) windows impose no constraint — solver must always succeed."""
         n = 6
         windows = [NO_WINDOW] * n
-        routes, etas = self._make_problem(n, windows, n_couriers=2)
+        routes, etas, _, _ = self._make_problem(n, windows, n_couriers=2)
         stops = [node for route in routes for node in route]
         assert sorted(stops) == list(range(1, n))
 
@@ -99,7 +100,7 @@ class TestTimeWindowAdherence:
             (START + 180, START + 240),  # node 2: 3h after start
             (START + 60, START + 120),   # node 3: 1h after start
         ]
-        routes, etas = self._make_problem(n, windows, n_couriers=1)
+        routes, etas, _, _ = self._make_problem(n, windows, n_couriers=1)
         node_eta = dict(_all_stops_etas(routes, etas))
 
         for node in [1, 2, 3]:
@@ -123,13 +124,14 @@ class TestMultiCourierWindows:
             (860, 980),
         ]
         t, d = make_matrix(n)
-        routes, etas = solve_vrptw(
+        routes, etas, _, _ = solve_vrptw(
             time_matrix=t,
             time_windows=windows,
             depot=0,
             courier_start_time=START,
             service_time_per_stop=3,
             num_couriers=2,
+            max_wait_min=MINUTES_PER_DAY,  # tests specifically check wait behaviour
         )
         node_eta = dict(_all_stops_etas(routes, etas))
         for node in [1, 2, 3, 4]:

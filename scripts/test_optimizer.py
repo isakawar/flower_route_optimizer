@@ -154,7 +154,7 @@ def main():
         logger.info("  Cluster %d (%d stops): %s", ci + 1, len(nodes), ", ".join(a[:40] for a in addrs))
 
     # --- Solve ---
-    routes, etas = solve_vrptw(
+    routes, etas, _, _ = solve_vrptw(
         time_matrix,
         time_windows,
         depot=0,

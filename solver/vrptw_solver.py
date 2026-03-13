@@ -52,7 +52,9 @@ def solve_vrptw(
     capacity: int | None = None,
     initial_routes: list[list[int]] | None = None,
     distance_matrix: list[list[float]] | None = None,
-) -> tuple[list[list[int]], list[list[int]]]:
+    max_wait_min: int = 15,
+    max_route_duration_min: int | None = None,
+) -> tuple[list[list[int]], list[list[int]], list[int]]:
     """
     Solve VRPTW: one or more couriers, all starting at depot at courier_start_time.
 
@@ -76,11 +78,11 @@ def solve_vrptw(
     Returns:
         (routes, etas): routes[v] = ordered node indices for courier v (depot excluded);
                         etas[v]   = arrival times in minutes since midnight per stop.
-        ([[], ...], [[], ...]) if no feasible solution found.
+        ([[], ...], [[], ...], []) if no feasible solution found.
     """
     if not time_matrix or not time_windows:
         logger.warning("VRPTW: empty input")
-        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)]
+        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)], [], []
 
     num_locations = len(time_matrix)
     if len(time_windows) != num_locations:
@@ -92,8 +94,12 @@ def solve_vrptw(
 
     _log_matrix_stats(time_matrix, distance_matrix)
 
-    # Allow waiting up to 4 hours at any stop
-    slack_max = 4 * 60
+    # Allow unlimited slack so couriers can depart at any time >= courier_start_time.
+    # Waiting is penalised by SetSlackCostCoefficientForAllVehicles, and route duration
+    # is capped by SetSpanUpperBoundForVehicle — both prevent gratuitous idling.
+    # (Previously slack_max = max_wait_min which also capped the depot delay, making
+    # flexible departure impossible for late time-window stops.)
+    slack_max = MINUTES_PER_DAY
 
     # Open-route: add a virtual end node so couriers do not need to return to depot.
     # Travel cost from any node to dummy_end is 0 (no return leg in objective).
@@ -147,12 +153,19 @@ def solve_vrptw(
     )
     time_dimension = routing.GetDimensionOrDie("Time")
 
-    # Fix every courier's departure from depot to exactly courier_start_time
+    # Couriers may depart any time on or after courier_start_time.
+    # The solver will choose the optimal departure per courier — one with only
+    # a 15:00 stop will depart ~14:49 rather than waiting idle since 09:00.
     for v in range(num_couriers):
         start_index = routing.Start(v)
         time_dimension.CumulVar(start_index).SetRange(
-            courier_start_time, courier_start_time
+            courier_start_time, MINUTES_PER_DAY
         )
+
+    # Hard cap on total route duration (including service time at every stop)
+    if max_route_duration_min is not None:
+        for v in range(num_couriers):
+            time_dimension.SetSpanUpperBoundForVehicle(max_route_duration_min, v)
 
     # Apply time windows to delivery stops (shared across all couriers)
     for location_idx in range(num_locations):
@@ -162,11 +175,25 @@ def solve_vrptw(
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetRange(tw_min, tw_max)
 
+    # Allow any stop to be dropped if its time window is truly unreachable.
+    # High penalty ensures the solver only drops as a last resort.
+    _DROP_PENALTY = 10_000_000
+    for location_idx in range(1, num_locations):  # skip depot (0)
+        routing.AddDisjunction(
+            [manager.NodeToIndex(location_idx)],
+            _DROP_PENALTY,
+        )
+
     # Penalise waiting: slack = idle time at each node before service.
     time_dimension.SetSlackCostCoefficientForAllVehicles(5)
 
-    # Finaliser: minimise finish time for each courier (tie-breaker)
+    # Finaliser: minimise both departure and finish time per courier.
+    # Minimising start pushes early-window couriers to depart promptly;
+    # minimising end gives a tiebreaker on route efficiency.
     for v in range(num_couriers):
+        routing.AddVariableMinimizedByFinalizer(
+            time_dimension.CumulVar(routing.Start(v))
+        )
         routing.AddVariableMinimizedByFinalizer(
             time_dimension.CumulVar(routing.End(v))
         )
@@ -234,15 +261,18 @@ def solve_vrptw(
 
     if not solution:
         logger.error("VRPTW: no feasible solution found")
-        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)]
+        return [[] for _ in range(num_couriers)], [[] for _ in range(num_couriers)], [], []
 
     routes: list[list[int]] = []
     etas: list[list[int]] = []
+    departures: list[int] = []  # actual departure time per courier (minutes since midnight)
 
     for v in range(num_couriers):
         v_route: list[int] = []
         v_etas: list[int] = []
         index = routing.Start(v)
+        dep_time = solution.Min(time_dimension.CumulVar(index))
+        departures.append(dep_time)
         total_dist_m = 0.0
         while not routing.IsEnd(index):
             node = manager.IndexToNode(index)
@@ -257,8 +287,16 @@ def solve_vrptw(
         routes.append(v_route)
         etas.append(v_etas)
         logger.info(
-            "VRPTW: courier %d — %d stops, %.1f km",
-            v + 1, len(v_route), total_dist_m / 1000,
+            "VRPTW: courier %d — departs %02d:%02d, %d stops, %.1f km",
+            v + 1, dep_time // 60, dep_time % 60, len(v_route), total_dist_m / 1000,
         )
 
-    return routes, etas
+    # Collect nodes that were dropped (disjunction self-loop in solution)
+    dropped_nodes: list[int] = []
+    for location_idx in range(1, num_locations):
+        index = manager.NodeToIndex(location_idx)
+        if solution.Value(routing.NextVar(index)) == index:
+            dropped_nodes.append(location_idx)
+            logger.info("VRPTW: node %d dropped (wait constraint)", location_idx)
+
+    return routes, etas, dropped_nodes, departures

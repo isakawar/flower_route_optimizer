@@ -12,7 +12,6 @@ import type { AppState, OptimizationParams, OptimizationResult, ProgressStep } f
 export default function Home() {
   const [appState, setAppState] = useState<AppState>("idle");
   const [result, setResult] = useState<OptimizationResult | null>(null);
-  const [lastStartTime, setLastStartTime] = useState("09:00");
   const [minCouriersRequired, setMinCouriersRequired] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [steps, setSteps] = useState<ProgressStep[]>(
@@ -22,7 +21,6 @@ export default function Home() {
   const handleSubmit = useCallback(async (params: OptimizationParams) => {
     const stepIds: string[] = PROGRESS_STEPS.map((s) => s.id);
 
-    setLastStartTime(params.startTime);
     setMinCouriersRequired(null);
     setErrorMessage(null);
     setAppState("loading");
@@ -122,7 +120,7 @@ export default function Home() {
 
           {appState === "complete" && result && (
             <div className="animate-fade-up">
-              <ResultsDashboard result={result} startTime={lastStartTime} onReset={handleReset} />
+              <ResultsDashboard result={result} onReset={handleReset} />
             </div>
           )}
 

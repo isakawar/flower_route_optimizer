@@ -44,9 +44,6 @@ export async function* runOptimization(
   try {
     const formData = new FormData();
     formData.append("file", params.csvFile);
-    formData.append("start_time", params.startTime);
-    formData.append("num_couriers", params.numCouriers.toString());
-    formData.append("capacity", params.capacity.toString());
 
     const res = await fetch("/api/optimize", {
       method: "POST",
