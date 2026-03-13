@@ -40,7 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEPOT_ADDRESS = "вулиця Нагірна, 18, Київ, Ukraine"
-SERVICE_TIME_PER_STOP = 3  # minutes
+SERVICE_TIME_PER_STOP = 15  # minutes (drive to door, hand over, sign)
 OSRM_ROUTE_URL = os.getenv("OSRM_URL", "http://router.project-osrm.org/table/v1/driving").replace(
     "/table/v1/", "/route/v1/"
 )
@@ -142,17 +142,23 @@ def _fmt_time(minutes: int) -> str:
 def _optimize_sync(
     raw: bytes,
     start_time: str,
-    num_couriers: int,
+    num_couriers: int | None,
     capacity: int | None,
+    time_buffer_min: int = 0,
 ) -> dict:
     """
     Full blocking pipeline: CSV → geocode → matrix → solve → build response.
     Must NOT be called directly from an async context — use asyncio.to_thread().
+
+    num_couriers=None → auto-calculate minimum required couriers.
+    time_buffer_min   → subtract this many minutes from every delivery window end
+                        so the solver never plans a delivery that arrives too close
+                        to the deadline (e.g. 17:55 when window closes at 18:00).
     """
     t_start = time.monotonic()
     logger.info(
-        "Optimization pipeline started: couriers=%d, start_time=%s, capacity=%s",
-        num_couriers, start_time, capacity,
+        "Optimization pipeline started: couriers=%s, start_time=%s, capacity=%s, buffer=%dmin",
+        num_couriers, start_time, capacity, time_buffer_min,
     )
 
     # 1. Parse CSV
@@ -219,26 +225,32 @@ def _optimize_sync(
         logger.exception("Matrix build failed")
         raise HTTPException(status_code=500, detail=f"Matrix build failed: {exc}") from exc
 
-    # 4. Time windows
+    # 4. Time windows (apply buffer: shorten window end by time_buffer_min)
     time_windows: list[tuple[int, int]] = [(courier_start_min, MINUTES_PER_DAY)]
     for order in geocoded:
         tw_s = _parse_minutes(order.time_start)
         tw_e = _parse_minutes(order.time_end)
         if tw_s is not None and tw_e is not None and tw_s <= tw_e:
-            time_windows.append((tw_s, tw_e))
+            tw_e_effective = tw_e - time_buffer_min
+            if tw_e_effective <= tw_s:
+                tw_e_effective = tw_e  # buffer too large — ignore it for this stop
+            time_windows.append((tw_s, tw_e_effective))
         else:
             time_windows.append((0, MINUTES_PER_DAY))
 
-    # 5. Feasibility check
+    # 5. Feasibility check + auto num_couriers
     cap_required = capacity_minimum_couriers(len(geocoded), capacity) if capacity else 1
     tw_required = estimate_minimum_couriers(
         time_windows, time_matrix, SERVICE_TIME_PER_STOP, courier_start_min
     )
     minimum_required = max(cap_required, tw_required)
 
-    if num_couriers < minimum_required:
+    auto_couriers = num_couriers is None
+    if auto_couriers:
+        num_couriers = minimum_required
+        logger.info("Auto num_couriers = %d (cap_req=%d, tw_req=%d)", num_couriers, cap_required, tw_required)
+    elif num_couriers < minimum_required:
         reason = "capacity_constraint" if cap_required >= tw_required else "time_window_constraint"
-        # Return a special sentinel so the async wrapper can return a JSONResponse
         return {
             "__infeasible__": True,
             "error": "INFEASIBLE",
@@ -335,6 +347,10 @@ def _optimize_sync(
         route_drive_min = sum(s["driveMin"] for s in stops)
         route_distance_km = route_distance_m / 1000
 
+        # Suggested departure: if courier waits at first stop, they can leave later.
+        first_wait = stops[0]["waitMin"] if stops else 0
+        suggested_departure = _fmt_time(courier_start_min + first_wait)
+
         geo_coords = (
             [office_coords]
             + [(geocoded[n - 1].lat, geocoded[n - 1].lng) for n in route_nodes]
@@ -346,6 +362,7 @@ def _optimize_sync(
             "stops": stops,
             "totalDriveMin": route_drive_min,
             "totalDistanceKm": round(route_distance_km, 2),
+            "suggestedDepartureTime": suggested_departure,
             "geometry": None,  # filled below
         })
 
@@ -373,6 +390,9 @@ def _optimize_sync(
             "totalDriveMin": total_drive_min,
             "totalDistanceKm": round(total_distance_km, 2),
             "numCouriers": len(result_routes),
+            "autoCouriers": auto_couriers,
+            "serviceTimePerStop": SERVICE_TIME_PER_STOP,
+            "timeBufferMin": time_buffer_min,
         },
         "depot": {
             "lat": office_coords[0],
@@ -549,8 +569,9 @@ class OrderInput(BaseModel):
 class OptimizeJsonRequest(BaseModel):
     orders: list[OrderInput]
     start_time: str = "09:00"
-    num_couriers: int = 1
+    num_couriers: int | None = None   # None = auto-calculate minimum required
     capacity: int | None = None
+    time_buffer_min: int = 15         # minutes of buffer before window end (default 15)
 
 
 class RecalculateStop(BaseModel):
@@ -581,13 +602,14 @@ def health():
 async def optimize(
     file: UploadFile = File(...),
     start_time: str = Form("09:00"),
-    num_couriers: int = Form(1),
+    num_couriers: int | None = Form(None),
     capacity: int | None = Form(None),
+    time_buffer_min: int = Form(15),
 ):
     # Read file content here (async-safe); everything else runs in a thread.
     raw = await file.read()
     try:
-        result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity)
+        result = await asyncio.to_thread(_optimize_sync, raw, start_time, num_couriers, capacity, time_buffer_min)
     except HTTPException:
         raise
     except Exception as exc:
@@ -635,7 +657,7 @@ async def optimize_json(
 
     try:
         result = await asyncio.to_thread(
-            _optimize_sync, raw, body.start_time, body.num_couriers, body.capacity
+            _optimize_sync, raw, body.start_time, body.num_couriers, body.capacity, body.time_buffer_min
         )
     except HTTPException:
         raise
