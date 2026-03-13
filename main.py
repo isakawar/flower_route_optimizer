@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 DEPOT_ADDRESS = "вулиця Нагірна, 18, Київ, Ukraine"
 SERVICE_TIME_PER_STOP = 15  # minutes (drive to door, hand over, sign)
+MAX_ROUTE_DURATION_MIN = 3 * 60  # 3h max per route — flower freshness + courier shift
 OSRM_ROUTE_URL = os.getenv("OSRM_URL", "http://router.project-osrm.org/table/v1/driving").replace(
     "/table/v1/", "/route/v1/"
 )
@@ -241,14 +242,18 @@ def _optimize_sync(
     # 5. Feasibility check + auto num_couriers
     cap_required = capacity_minimum_couriers(len(geocoded), capacity) if capacity else 1
     tw_required = estimate_minimum_couriers(
-        time_windows, time_matrix, SERVICE_TIME_PER_STOP, courier_start_min
+        time_windows, time_matrix, SERVICE_TIME_PER_STOP, courier_start_min,
+        max_route_duration_min=MAX_ROUTE_DURATION_MIN,
     )
     minimum_required = max(cap_required, tw_required)
 
     auto_couriers = num_couriers is None
     if auto_couriers:
         num_couriers = minimum_required
-        logger.info("Auto num_couriers = %d (cap_req=%d, tw_req=%d)", num_couriers, cap_required, tw_required)
+        logger.info(
+            "Auto num_couriers = %d (cap=%d, tw_or_duration=%d)",
+            num_couriers, cap_required, tw_required,
+        )
     elif num_couriers < minimum_required:
         reason = "capacity_constraint" if cap_required >= tw_required else "time_window_constraint"
         return {
@@ -275,7 +280,7 @@ def _optimize_sync(
 
     # 7. Solve
     try:
-        routes, _ = solve_vrptw(
+        routes, solver_etas, dropped_nodes, solver_departures = solve_vrptw(
             time_matrix,
             time_windows,
             depot=0,
@@ -285,13 +290,24 @@ def _optimize_sync(
             capacity=capacity,
             initial_routes=initial_routes,
             distance_matrix=distance_matrix,
+            max_wait_min=20,
+            max_route_duration_min=MAX_ROUTE_DURATION_MIN,
         )
     except Exception as exc:
         logger.exception("Solver crashed")
         raise HTTPException(status_code=500, detail=f"Solver error: {exc}") from exc
 
-    if all(len(r) == 0 for r in routes):
+    if all(len(r) == 0 for r in routes) and not dropped_nodes:
         raise HTTPException(status_code=500, detail="Solver found no feasible solution")
+
+    # Dropped stops: each gets a dedicated solo courier (departs exactly when needed)
+    for node in dropped_nodes:
+        routes.append([node])
+    if dropped_nodes:
+        logger.info(
+            "%d stop(s) could not be scheduled without >15 min wait → assigned as solo couriers",
+            len(dropped_nodes),
+        )
 
     # 8. Build response (geometry fetched in parallel after the main loop)
     result_routes = []
@@ -305,8 +321,24 @@ def _optimize_sync(
             continue
 
         stops = []
-        current_time = courier_start_min
         prev_node = 0
+
+        # Use actual departure time from solver when available (v < num solver couriers).
+        # Dropped solo couriers are appended after the solver routes, so derive their
+        # departure from the time window of their single stop.
+        if v < len(solver_departures):
+            departure_min = solver_departures[v]
+            v_etas = solver_etas[v]
+        else:
+            node = route_nodes[0]
+            order = geocoded[node - 1]
+            drive_from_depot = int(round(time_matrix[0][node] / 60))
+            tw_s = _parse_minutes(order.time_start)
+            eta_solo = max(courier_start_min + drive_from_depot, tw_s or 0)
+            departure_min = eta_solo - drive_from_depot
+            v_etas = [eta_solo]
+
+        current_time = departure_min
 
         prev_chain = [0] + list(route_nodes)
         route_distance_m = sum(
@@ -314,21 +346,20 @@ def _optimize_sync(
             for i in range(len(route_nodes))
         ) + distance_matrix[route_nodes[-1]][0]
 
-        for node in route_nodes:
+        for idx, node in enumerate(route_nodes):
             order = geocoded[node - 1]
             drive_min = int(round(time_matrix[prev_node][node] / 60))
-            natural_arrival = current_time + drive_min
 
-            tw_s = _parse_minutes(order.time_start)
-            tw_e = _parse_minutes(order.time_end)
-            has_window = tw_s is not None and tw_e is not None
-
-            if has_window and natural_arrival < tw_s:
-                wait_min = tw_s - natural_arrival
-                eta_min = tw_s
+            # Use solver ETA when available; otherwise simulate from current_time.
+            if idx < len(v_etas):
+                eta_min = v_etas[idx]
             else:
-                wait_min = 0
-                eta_min = natural_arrival
+                tw_s = _parse_minutes(order.time_start)
+                natural_arrival = current_time + drive_min
+                eta_min = max(natural_arrival, tw_s) if tw_s else natural_arrival
+
+            arrival = current_time + drive_min
+            wait_min = max(0, eta_min - arrival)
 
             stops.append({
                 "address": f"{order.city}, {order.address} {order.house}",
@@ -347,9 +378,7 @@ def _optimize_sync(
         route_drive_min = sum(s["driveMin"] for s in stops)
         route_distance_km = route_distance_m / 1000
 
-        # Suggested departure: if courier waits at first stop, they can leave later.
-        first_wait = stops[0]["waitMin"] if stops else 0
-        suggested_departure = _fmt_time(courier_start_min + first_wait)
+        suggested_departure = _fmt_time(departure_min)
 
         geo_coords = (
             [office_coords]

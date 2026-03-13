@@ -249,7 +249,7 @@ def main() -> None:
             time_windows.append((0, MINUTES_PER_DAY))
 
     # 4. Run solver
-    routes, _ = solve_vrptw(
+    routes, _, _, _ = solve_vrptw(
         time_matrix,
         time_windows,
         depot=DEPOT_NODE,

@@ -13,7 +13,6 @@ import { recalculate } from "@/lib/api";
 
 interface Props {
   result: OptimizationResult;
-  startTime: string;
   onReset: () => void;
 }
 
@@ -45,7 +44,7 @@ function applyDragDrop(
   };
 }
 
-export default function ResultsDashboard({ result, startTime, onReset }: Props) {
+export default function ResultsDashboard({ result, onReset }: Props) {
   const [highlightedCourier, setHighlightedCourier] = useState<number | null>(null);
   const [mutableResult, setMutableResult] = useState<OptimizationResult>(result);
   const [isDirty, setIsDirty] = useState(false);
@@ -133,7 +132,6 @@ export default function ResultsDashboard({ result, startTime, onReset }: Props) 
       const params: RecalculateParams = {
         routes,
         depot: mutableResult.depot,
-        startTime,
       };
       const newResult = await recalculate(params);
       setMutableResult(newResult);
@@ -143,7 +141,7 @@ export default function ResultsDashboard({ result, startTime, onReset }: Props) 
     } finally {
       setRecalculating(false);
     }
-  }, [mutableResult, startTime]);
+  }, [mutableResult]);
 
   const editingStopData = editingStop
     ? mutableResult.routes.find((r) => r.courierId === editingStop.courierId)?.stops[editingStop.stopIdx]

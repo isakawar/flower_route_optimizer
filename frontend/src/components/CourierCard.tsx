@@ -225,8 +225,10 @@ export default function CourierCard({
         <div className="flex items-center gap-1 text-text-muted text-[11px]">
           <MapPin size={10} />
           <span>
-            Перший вихід о{" "}
-            <span className="text-text-secondary tabular-nums">{route.stops[0]?.eta}</span>
+            Виїзд о{" "}
+            <span className="text-text-secondary tabular-nums">
+              {route.suggestedDepartureTime ?? route.stops[0]?.eta}
+            </span>
           </span>
         </div>
         {hasWaiting && (
