@@ -1,7 +1,6 @@
-
 services:
 
-  # ── OSRM: step 1 — download Kyiv OSM data (runs once) ─────────────────────
+  # ── OSRM: step 1 — download Ukraine OSM data (runs once, alpine has curl) ────
   osrm-init:
     image: alpine:3
     restart: "no"
@@ -11,15 +10,15 @@ services:
       sh -c "
         if [ ! -f /data/kyiv-latest.osm.pbf ] && [ ! -f /data/kyiv-latest.osrm ]; then
           apk add --no-cache curl &&
-          echo 'Downloading Kyiv OSM data...' &&
-          curl -L -o /data/kyiv-latest.osm.pbf https://download.geofabrik.de/europe/ukraine/kyiv-latest.osm.pbf &&
+          echo 'Downloading Kyiv OSM data (~400 MB)...' &&
+          curl -L -o /data/kyiv-latest.osm.pbf https://download.geofabrik.de/europe/ukraine-latest.osm.pbf &&
           echo 'Download complete.'
         else
           echo 'OSM data already present, skipping download.'
         fi
       "
 
-  # ── OSRM: step 2 — preprocess graph + run router ───────────────────────────
+  # ── OSRM: step 2 — preprocess graph + run router ─────────────────────────────
   osrm:
     image: ghcr.io/project-osrm/osrm-backend:v5.27.1
     restart: unless-stopped
@@ -30,24 +29,24 @@ services:
         condition: service_completed_successfully
     entrypoint: >
       sh -c "
-        if [ ! -f /data/kyiv-latest.osrm ]; then
-          echo 'Preprocessing OSRM graph (Kyiv region)...' &&
-          osrm-extract -p /opt/car.lua /data/kyiv-latest.osm.pbf &&
-          osrm-partition /data/kyiv-latest.osrm &&
-          osrm-customize /data/kyiv-latest.osrm &&
-          rm -f /data/kyiv-latest.osm.pbf &&
+        if [ ! -f /data/ukraine-latest.osrm ]; then
+          echo 'Preprocessing OSRM graph (3-5 min)...' &&
+          osrm-extract -p /opt/car.lua /data/ukraine-latest.osm.pbf &&
+          osrm-partition /data/ukraine-latest.osrm &&
+          osrm-customize /data/ukraine-latest.osrm &&
+          rm -f /data/ukraine-latest.osm.pbf &&
           echo 'OSRM graph ready.'
         fi &&
-        osrm-routed --algorithm mld /data/kyiv-latest.osrm --port 5000 --max-table-size 1000
+        osrm-routed --algorithm mld /data/ukraine-latest.osrm --port 5000 --max-table-size 1000
       "
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/5000' || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
-      start_period: 900s
+      start_period: 600s
 
-  # ── Redis (geocoding cache) ─────────────────────────────────────────────────
+  # ── Redis (geocoding cache) ───────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -60,7 +59,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Python / FastAPI backend ───────────────────────────────────────────────
+  # ── Python / FastAPI backend ──────────────────────────────────────────────────
   backend:
     build:
       context: .
@@ -73,6 +72,8 @@ services:
       REDIS_URL: redis://redis:6379
       OSRM_URL: http://osrm:5000/table/v1/driving
     env_file:
+      # Create a .env file with secrets (GOOGLE_MAPS_API_KEY, etc.).
+      # The file is optional — the service starts without it.
       - path: .env
         required: false
     depends_on:
@@ -91,7 +92,7 @@ services:
       retries: 3
       start_period: 40s
 
-  # ── Next.js frontend ───────────────────────────────────────────────────────
+  # ── Next.js frontend ──────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -109,5 +110,7 @@ services:
         condition: service_healthy
 
 volumes:
+  # Redis RDB snapshot — geocodes survive container restarts
   redis_data:
+  # OSRM preprocessed Ukraine road graph — persists across container restarts
   osrm_data:
