@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     volumes:
       - osrm_data:/data
+    ports:
+      - "5000:5000"
     command: >
       osrm-routed
       --algorithm mld
