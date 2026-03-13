@@ -8,6 +8,7 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 redis
+rq
 pytest
 httpx
 hypothesis

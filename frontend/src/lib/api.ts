@@ -26,52 +26,94 @@ function parseApiError(body: Record<string, unknown>, status: number): Error {
   return new Error(typeof detail === "string" ? detail : `Server error ${status}`);
 }
 
-// Simulate progressive progress updates
+const POLL_INTERVAL_MS = 1500;
+const MAX_WAIT_MS = 5 * 60 * 1000;
+
 export async function* runOptimization(
   params: OptimizationParams,
   onStep: (stepId: string) => void
 ): AsyncGenerator<OptimizationResult> {
-  const steps = ["upload", "geocode", "matrix", "optimize", "finalize"];
-  const delays = [800, 1400, 1800, 3000, 700];
-
-  for (let i = 0; i < steps.length; i++) {
-    await new Promise((r) => setTimeout(r, delays[i]));
-    onStep(steps[i]);
-  }
-
-  // Try real API; throw on backend errors, fall back to mock only if unreachable
   let backendReachable = false;
+
   try {
     const formData = new FormData();
     formData.append("file", params.csvFile);
 
+    // Submit job (returns immediately with jobId)
     const res = await fetch("/api/optimize", {
       method: "POST",
       body: formData,
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(15_000),
     });
 
-    backendReachable = true; // got an HTTP response → backend is running
+    backendReachable = true;
 
-    if (res.ok) {
-      const data = await res.json();
-      yield data as OptimizationResult;
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw parseApiError(body, res.status);
+    }
+
+    const submission = await res.json();
+
+    // Sync fallback (RQ unavailable): backend returned result directly
+    if (submission.status === "done" && submission.result) {
+      onStep("finalize");
+      yield submission.result as OptimizationResult;
       return;
     }
 
-    // Backend returned an error — surface it instead of silently using mock data
-    const body = await res.json().catch(() => ({}));
-    throw parseApiError(body, res.status);
-  } catch (err) {
-    if (backendReachable) {
-      // Re-throw: backend is up but returned an error (bad CSV, no solution, etc.)
-      throw err;
+    const { jobId } = submission;
+    onStep("upload");
+
+    // Poll until done
+    const started = Date.now();
+    let lastStep = "upload";
+
+    while (Date.now() - started < MAX_WAIT_MS) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+      const pollRes = await fetch(`/api/jobs/${jobId}`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (!pollRes.ok) {
+        const body = await pollRes.json().catch(() => ({}));
+        throw parseApiError(body, pollRes.status);
+      }
+
+      const job = await pollRes.json();
+
+      if (job.status === "done") {
+        onStep("finalize");
+        yield job.result as OptimizationResult;
+        return;
+      }
+
+      if (job.status === "failed") {
+        throw new Error(job.error || "Optimization failed");
+      }
+
+      // Forward real progress step from backend
+      const step: string | undefined = job.progress?.currentStep;
+      if (step && step !== lastStep) {
+        lastStep = step;
+        onStep(step);
+      }
     }
-    // Backend is not running — fall back to demo data so the UI is still usable
+
+    throw new Error("Optimization timed out after 5 minutes");
+  } catch (err) {
+    if (backendReachable) throw err;
+    // Backend not running — fall back to demo data
     console.info("[api] Backend unreachable — using demo data");
   }
 
   // Demo mode (no backend running)
+  const demoSteps = ["upload", "geocode", "matrix", "optimize", "finalize"];
+  for (const step of demoSteps) {
+    await new Promise((r) => setTimeout(r, 600));
+    onStep(step);
+  }
   yield MOCK_RESULT;
 }
 

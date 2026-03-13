@@ -20,7 +20,6 @@ tests/
 scripts/
 docs/
 pytest.ini
-requirements.txt
 
 # Frontend (built separately)
 frontend/
