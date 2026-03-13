@@ -15,7 +15,7 @@ services:
       --max-table-size 10000
       --max-matching-size 1000
       --threads 4
-      /data/ukraine-latest.osrm
+      /data/kyiv-region.osrm
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/5000' || exit 1"]
       interval: 15s
