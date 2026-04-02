@@ -213,7 +213,11 @@ def _optimize_sync(
     geocoder = GeocodingService()
 
     try:
-        office_coords = geocoder.geocode(DEPOT_ADDRESS)
+        office_coords = geocoder.geocode(
+            DEPOT_ADDRESS,
+            city="Kyiv",
+            country="UA",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Geocoding error: {exc}") from exc
     if not office_coords:
@@ -384,21 +388,33 @@ def _optimize_sync(
             order = geocoded[node - 1]
             drive_min = int(round(time_matrix[prev_node][node] / 60))
 
-            # Use solver ETA when available; otherwise simulate from current_time.
+            # natural_arrival = departure from prev stop (after 15-min service) + drive time.
+            # This is the minimum ETA that correctly accounts for service time at every stop.
+            # The solver ETA (v_etas) is used as-is when it is >= natural_arrival
+            # (e.g. courier waits for a time window to open).
+            # If the solver ETA is earlier than natural_arrival it means OR-Tools did not
+            # fully propagate the service-time transit for unconstrained stops — in that
+            # case we fall back to natural_arrival so service time is never skipped.
+            natural_arrival = current_time + drive_min
+            tw_s = _parse_minutes(order.time_start)
+
             if idx < len(v_etas):
-                eta_min = v_etas[idx]
+                eta_min = max(v_etas[idx], natural_arrival)
             else:
-                tw_s = _parse_minutes(order.time_start)
-                natural_arrival = current_time + drive_min
                 eta_min = max(natural_arrival, tw_s) if tw_s else natural_arrival
 
-            arrival = current_time + drive_min
+            # If the time window hasn't opened yet, wait until it does.
+            if tw_s and eta_min < tw_s:
+                eta_min = tw_s
+
+            arrival = natural_arrival
             wait_min = max(0, eta_min - arrival)
 
             stops.append({
                 "address": f"{order.city}, {order.address} {order.house}",
                 "eta": _fmt_time(eta_min),
                 "driveMin": drive_min,
+                "serviceMin": SERVICE_TIME_PER_STOP,
                 "waitMin": wait_min,
                 "lat": order.lat,
                 "lng": order.lng,
@@ -537,6 +553,7 @@ def _recalculate_sync(
                 "address": stop.address,
                 "eta": _fmt_time(eta_min),
                 "driveMin": drive_min,
+                "serviceMin": SERVICE_TIME_PER_STOP,
                 "waitMin": wait_min,
                 "lat": stop.lat,
                 "lng": stop.lng,

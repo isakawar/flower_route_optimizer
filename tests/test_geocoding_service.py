@@ -176,3 +176,36 @@ class TestNormalisation:
                 svc.geocode("вулиця Хрещатик 1, Київ, Ukraine")
         # Second call should have been a cache hit
         assert mock_get.call_count == 1
+
+    def test_cache_key_changes_when_city_country_bias_is_set(self, tmp_cache: Path):
+        """Biased queries must not reuse a stale generic cache entry."""
+        svc = GeocodingService(cache_path=tmp_cache)
+        with patch("services.geocoding_service.requests.get", _google_mock()) as mock_get:
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                svc.geocode("Nahorna 18")
+                svc.geocode("Nahorna 18", city="Kyiv", country="UA")
+        assert mock_get.call_count == 2
+
+
+class TestQueryBias:
+    def test_google_request_includes_components_for_city_country(self, service: GeocodingService):
+        with patch("services.geocoding_service.requests.get", _google_mock()) as mock_get:
+            with patch.dict("os.environ", {"GOOGLE_MAPS_API_KEY": "test-key"}):
+                service.geocode("Nahorna 18", city="Kyiv", country="UA")
+
+        _, kwargs = mock_get.call_args
+        params = kwargs["params"]
+        assert params["address"] == "Nahorna 18"
+        assert params["region"] == "ua"
+        assert "locality:Kyiv" in params["components"]
+        assert "country:ua" in params["components"]
+
+    def test_nominatim_request_includes_country_code_and_extended_query(self, service: GeocodingService):
+        with patch("services.geocoding_service.requests.get", _nominatim_mock()) as mock_get:
+            with patch.dict("os.environ", {}, clear=True):
+                service.geocode("Nahorna 18", city="Kyiv", country="UA")
+
+        _, kwargs = mock_get.call_args
+        params = kwargs["params"]
+        assert params["countrycodes"] == "ua"
+        assert params["q"] == "Nahorna 18, Kyiv, UA"

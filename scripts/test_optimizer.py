@@ -77,7 +77,7 @@ def main():
 
     # --- Geocode ---
     geocoder = GeocodingService()
-    depot_coords = geocoder.geocode(DEPOT_ADDRESS)
+    depot_coords = geocoder.geocode(DEPOT_ADDRESS, city="Kyiv", country="UA")
     if not depot_coords:
         logger.error("Could not geocode depot")
         sys.exit(1)

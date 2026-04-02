@@ -29,6 +29,12 @@ DEFAULT_CACHE_PATH = Path(os.getenv("GEOCODE_CACHE_PATH", "geocode_cache.json"))
 _REDIS_KEY_PREFIX = "geocode:"
 _REDIS_TTL = 30 * 24 * 3600  # 30 days
 
+_COUNTRY_TO_CODE = {
+    "ua": "ua",
+    "ukraine": "ua",
+    "україна": "ua",
+}
+
 # Street-type prefixes to strip before using an address as a cache key.
 _PREFIX_RE = re.compile(
     r"\b(вул\.?|вулиця|ул\.?|улица|str\.?|street|пр\.?|просп\.?|проспект"
@@ -49,6 +55,32 @@ def _normalize(address: str) -> str:
     s = re.sub(r"[^\w\s]", " ", s)      # drop punctuation (keeps Unicode letters/digits)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _to_country_code(country: str | None) -> str | None:
+    if not country:
+        return None
+    value = country.strip().lower()
+    if not value:
+        return None
+    mapped = _COUNTRY_TO_CODE.get(value)
+    if mapped:
+        return mapped
+    if len(value) == 2 and value.isalpha():
+        return value
+    return None
+
+
+def _build_cache_key(address: str, city: str | None, country: str | None) -> str:
+    parts = [address]
+    if city and city.strip():
+        parts.append(f"city={city.strip()}")
+    country_code = _to_country_code(country)
+    if country_code:
+        parts.append(f"country={country_code}")
+    elif country and country.strip():
+        parts.append(f"country={country.strip()}")
+    return _normalize(" | ".join(parts))
 
 
 class GeocodingService:
@@ -140,7 +172,12 @@ class GeocodingService:
 
     # ── public API ─────────────────────────────────────────────────────────────
 
-    def geocode(self, address: str) -> tuple[float, float] | None:
+    def geocode(
+        self,
+        address: str,
+        city: str | None = None,
+        country: str | None = None,
+    ) -> tuple[float, float] | None:
         """
         Convert address string to (latitude, longitude).
 
@@ -154,7 +191,7 @@ class GeocodingService:
         if not address:
             return None
 
-        key = _normalize(address)
+        key = _build_cache_key(address, city, country)
         cached = self._cache_get(key)
         if cached is not None:
             logger.debug("Geocode cache hit: %s", address[:50])
@@ -162,15 +199,33 @@ class GeocodingService:
 
         api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
         if api_key:
-            return self._geocode_google(address, key, api_key)
-        return self._geocode_nominatim(address, key)
+            return self._geocode_google(address, key, api_key, city=city, country=country)
+        return self._geocode_nominatim(address, key, city=city, country=country)
 
-    def _geocode_google(self, address: str, key: str, api_key: str) -> tuple[float, float] | None:
+    def _geocode_google(
+        self,
+        address: str,
+        key: str,
+        api_key: str,
+        city: str | None = None,
+        country: str | None = None,
+    ) -> tuple[float, float] | None:
         logger.info("Google Geocoding API call: %s", address[:80])
+        country_code = _to_country_code(country)
+        params = {"address": address, "key": api_key}
+        components = []
+        if city and city.strip():
+            components.append(f"locality:{city.strip()}")
+        if country_code:
+            components.append(f"country:{country_code}")
+            params["region"] = country_code
+        if components:
+            params["components"] = "|".join(components)
+
         try:
             response = requests.get(
                 GOOGLE_GEOCODE_URL,
-                params={"address": address, "key": api_key},
+                params=params,
                 timeout=10,
             )
             response.raise_for_status()
@@ -185,7 +240,7 @@ class GeocodingService:
                 address[:50],
                 data.get("status"),
             )
-            return self._geocode_nominatim(address, key)
+            return self._geocode_nominatim(address, key, city=city, country=country)
 
         location = data["results"][0]["geometry"]["location"]
         lat, lng = float(location["lat"]), float(location["lng"])
@@ -193,12 +248,29 @@ class GeocodingService:
         self._cache_set(key, lat, lng)
         return (lat, lng)
 
-    def _geocode_nominatim(self, address: str, key: str) -> tuple[float, float] | None:
+    def _geocode_nominatim(
+        self,
+        address: str,
+        key: str,
+        city: str | None = None,
+        country: str | None = None,
+    ) -> tuple[float, float] | None:
         logger.info("Nominatim API call: %s", address[:80])
+        query = address
+        if city and city.strip() and city.lower() not in query.lower():
+            query = f"{query}, {city.strip()}"
+        if country and country.strip() and country.lower() not in query.lower():
+            query = f"{query}, {country.strip()}"
+
+        params = {"q": query, "format": "json", "limit": 1}
+        country_code = _to_country_code(country)
+        if country_code:
+            params["countrycodes"] = country_code
+
         try:
             response = requests.get(
                 NOMINATIM_URL,
-                params={"q": address, "format": "json", "limit": 1},
+                params=params,
                 headers={"User-Agent": NOMINATIM_USER_AGENT},
                 timeout=10,
             )

@@ -188,7 +188,10 @@ def main() -> None:
 
     # 2. Geocode addresses
     geocoder = GeocodingService()
-    office_coords = geocoder.geocode(office_address)
+    if office_address.strip() == DEFAULT_OFFICE:
+        office_coords = geocoder.geocode(office_address, city="Kyiv", country="UA")
+    else:
+        office_coords = geocoder.geocode(office_address)
     if not office_coords:
         logger.error("Could not geocode office: %s", office_address)
         if use_json:
