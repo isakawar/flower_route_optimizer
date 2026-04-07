@@ -1211,7 +1211,6 @@ class RecalculateRoute(BaseModel):
 
 class RecalculateRequest(BaseModel):
     routes: list[RecalculateRoute]
-    depot: dict | None = None  # {"lat": float, "lng": float}; None → default Kyiv depot
     startTime: str = "09:00"
 
 
@@ -1238,7 +1237,6 @@ class DistributeRoute(BaseModel):
 class DistributeRequest(BaseModel):
     existing_routes: list[DistributeRoute]
     new_orders: list[OrderInput]
-    depot: dict | None = None
     time_buffer_min: int = 15
     max_wait_min: int = 15
     allow_departure_adjustment: bool = False
@@ -1370,8 +1368,6 @@ async def optimize_json(
     return result
 
 
-_DEFAULT_DEPOT = (50.4422, 30.5367)  # Kyiv city center fallback
-
 
 @app.post("/api/recalculate")
 async def recalculate_routes(
@@ -1402,18 +1398,13 @@ async def recalculate_routes(
                 detail={"error": "INVALID_INPUT", "message": f"Courier {route.courierId}: {len(invalid)} stop(s) missing lat/lng"},
             )
 
-    if body.depot is not None:
-        depot_lat = body.depot.get("lat")
-        depot_lng = body.depot.get("lng")
-        if depot_lat is None or depot_lng is None:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "INVALID_INPUT", "message": "depot must have lat and lng"},
-            )
-        depot_coords = (float(depot_lat), float(depot_lng))
-    else:
-        depot_coords = _DEFAULT_DEPOT
-        logger.info("No depot provided, using default Kyiv depot %s", depot_coords)
+    geocoder = GeocodingService()
+    try:
+        depot_coords = geocoder.geocode(DEPOT_ADDRESS, city="Kyiv", country="UA")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Geocoding error: {exc}") from exc
+    if not depot_coords:
+        raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
 
     try:
         result = await asyncio.to_thread(
@@ -1454,17 +1445,13 @@ async def distribute_orders(
             detail={"error": "INVALID_INPUT", "message": "new_orders cannot be empty"},
         )
 
-    if body.depot is not None:
-        lat = body.depot.get("lat")
-        lng = body.depot.get("lng")
-        if lat is None or lng is None:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "INVALID_INPUT", "message": "depot must have lat and lng"},
-            )
-        depot_coords = (float(lat), float(lng))
-    else:
-        depot_coords = _DEFAULT_DEPOT
+    geocoder = GeocodingService()
+    try:
+        depot_coords = geocoder.geocode(DEPOT_ADDRESS, city="Kyiv", country="UA")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Geocoding error: {exc}") from exc
+    if not depot_coords:
+        raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
 
     earliest_dep_min = _parse_minutes(body.earliest_departure)
     if earliest_dep_min is None:
