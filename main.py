@@ -601,6 +601,548 @@ def _recalculate_sync(
 
 
 # ---------------------------------------------------------------------------
+# Distribute helpers
+# ---------------------------------------------------------------------------
+
+def _check_insertion(
+    stops: list,
+    pos: int,
+    new_coord: tuple[float, float],
+    new_tw_s: int | None,
+    new_tw_e: int | None,
+    departure_min: int,
+    depot_idx: int,
+    coord_to_idx: dict,
+    time_matrix: list,
+    max_wait_min: int = 15,
+) -> tuple[float, bool]:
+    """
+    Check feasibility of inserting a new stop at position `pos` in `stops`.
+
+    Simulates the full ETA chain from departure through all stops (prefix + new + suffix),
+    checking time-window-end violations and max_wait_min at every stop.
+
+    Returns (extra_drive_cost_minutes, is_feasible).
+    extra_drive_cost = time(prev→new) + time(new→next) - time(prev→next).
+    """
+    new_idx = coord_to_idx[new_coord]
+
+    # Simulate prefix (stops 0..pos-1): check tw_e + wait for each
+    current_time = departure_min
+    prev_idx = depot_idx
+    for i in range(pos):
+        s = stops[i]
+        s_idx = coord_to_idx[(s.lat, s.lng)]
+        drive = int(round(time_matrix[prev_idx][s_idx] / 60))
+        natural = current_time + drive
+        tw_s = _parse_minutes(s.delivery_window_start)
+        tw_e = _parse_minutes(s.delivery_window_end)
+        eta = max(natural, tw_s) if tw_s else natural
+        if tw_e is not None and eta > tw_e:
+            return float("inf"), False
+        if (eta - natural) > max_wait_min:
+            return float("inf"), False
+        current_time = eta + SERVICE_TIME_PER_STOP
+        prev_idx = s_idx
+
+    # Insertion cost = extra drive time added to route
+    drive_to_new = int(round(time_matrix[prev_idx][new_idx] / 60))
+    if pos < len(stops):
+        nxt_idx = coord_to_idx[(stops[pos].lat, stops[pos].lng)]
+        extra_cost = (
+            drive_to_new
+            + int(round(time_matrix[new_idx][nxt_idx] / 60))
+            - int(round(time_matrix[prev_idx][nxt_idx] / 60))
+        )
+    else:
+        extra_cost = drive_to_new
+
+    # Check new stop's time window and wait
+    natural_new = current_time + drive_to_new
+    eta_new = max(natural_new, new_tw_s) if new_tw_s else natural_new
+    if new_tw_e is not None and eta_new > new_tw_e:
+        return float("inf"), False
+    if (eta_new - natural_new) > max_wait_min:
+        return float("inf"), False
+
+    current_time = eta_new + SERVICE_TIME_PER_STOP
+    prev_idx = new_idx
+
+    # Check all remaining existing stops: tw_e + wait
+    for s in stops[pos:]:
+        s_idx = coord_to_idx[(s.lat, s.lng)]
+        drive = int(round(time_matrix[prev_idx][s_idx] / 60))
+        natural = current_time + drive
+        tw_s = _parse_minutes(s.delivery_window_start)
+        tw_e = _parse_minutes(s.delivery_window_end)
+        eta = max(natural, tw_s) if tw_s else natural
+        if tw_e is not None and eta > tw_e:
+            return float("inf"), False
+        if (eta - natural) > max_wait_min:
+            return float("inf"), False
+        current_time = eta + SERVICE_TIME_PER_STOP
+        prev_idx = s_idx
+
+    # Check total route duration
+    if (current_time - departure_min) > MAX_ROUTE_DURATION_MIN + SERVICE_TIME_PER_STOP:
+        return float("inf"), False
+
+    return float(extra_cost), True
+
+
+def _compute_adjusted_departure(
+    stops: list,
+    pos: int,
+    new_coord: tuple[float, float],
+    new_tw_s: int | None,
+    new_tw_e: int | None,
+    orig_dep_min: int,
+    earliest_dep_min: int,
+    depot_idx: int,
+    coord_to_idx: dict,
+    time_matrix: list,
+    max_wait_min: int,
+) -> tuple[int | None, float]:
+    """
+    Find the minimum departure time > orig_dep_min (and >= earliest_dep_min)
+    that makes the insertion feasible given max_wait_min constraints.
+
+    Strategy: compute pure travel time from depot to new stop (drive + service per prefix
+    stop, no waits), then back-calculate the departure that puts the courier at the new
+    stop exactly max_wait_min before new_tw_s opens.  Verify with full _check_insertion.
+
+    Returns (adjusted_dep_min, extra_drive_cost) or (None, inf) if not possible.
+    """
+    if new_tw_s is None:
+        return None, float("inf")  # no window start → no target to aim for
+
+    new_idx = coord_to_idx[new_coord]
+
+    # Pure travel time: sum of drives + service time at each prefix stop
+    pure_time = 0
+    prev_idx = depot_idx
+    for i in range(pos):
+        s = stops[i]
+        s_idx = coord_to_idx[(s.lat, s.lng)]
+        pure_time += int(round(time_matrix[prev_idx][s_idx] / 60)) + SERVICE_TIME_PER_STOP
+        prev_idx = s_idx
+    pure_time += int(round(time_matrix[prev_idx][new_idx] / 60))
+
+    # Departure so courier arrives exactly (max_wait_min) before window opens
+    dep_lo = new_tw_s - max_wait_min - pure_time
+    candidate_dep = max(earliest_dep_min, dep_lo)
+
+    # Only consider forward adjustments (later departure reduces wait)
+    if candidate_dep <= orig_dep_min:
+        return None, float("inf")
+
+    cost, feasible = _check_insertion(
+        stops, pos, new_coord, new_tw_s, new_tw_e,
+        candidate_dep, depot_idx, coord_to_idx, time_matrix, max_wait_min,
+    )
+    if feasible:
+        return candidate_dep, cost
+    return None, float("inf")
+
+
+def _distribute_sync(
+    existing_routes: list,
+    new_orders: list,
+    depot_coords: tuple[float, float],
+    time_buffer_min: int = 15,
+    max_wait_min: int = 15,
+    allow_departure_adjustment: bool = False,
+    earliest_dep_min: int = 480,  # 08:00 default
+) -> dict:
+    """
+    Blocking distribute pipeline:
+    1. Geocode missing coords for existing stops and new orders.
+    2. Build a single OSRM matrix covering all coords.
+    3. For each new order (EDF order), find the cheapest feasible insertion
+       across all existing routes (with optional departure adjustment).
+       Unfit orders go to new routes solved by VRPTW.
+    4. Recalculate all ETAs and fetch geometries.
+    """
+    t_start = time.monotonic()
+    geocoder = GeocodingService()
+
+    # --- 1. Geocode existing stops that lack coordinates ---
+    stops_need_geocode = [
+        s for route in existing_routes for s in route.stops
+        if s.lat is None or s.lng is None
+    ]
+    if stops_need_geocode:
+        def _geocode_exist(stop):
+            addr = f"{stop.city}, {stop.address} {stop.house}, Ukraine"
+            try:
+                return stop, geocoder.geocode(addr)
+            except Exception as exc:
+                logger.warning("Existing stop %s geocoding error: %s", stop.id, exc)
+                return stop, None
+
+        with ThreadPoolExecutor(max_workers=min(10, len(stops_need_geocode))) as ex:
+            for stop, coords in ex.map(_geocode_exist, stops_need_geocode):
+                if coords:
+                    stop.lat, stop.lng = coords
+                else:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "error": "GEOCODING_FAILED",
+                            "message": (
+                                f"Cannot geocode existing stop id={stop.id}: "
+                                f"{stop.city}, {stop.address} {stop.house}"
+                            ),
+                        },
+                    )
+
+    # --- 2. Geocode new orders ---
+    order_coords: dict = {}  # order_key -> (lat, lng)
+
+    def _order_key(o, idx: int):
+        return o.id if o.id is not None else f"__new_{idx}"
+
+    def _geocode_new(args):
+        idx, order = args
+        addr = f"{order.city}, {order.address} {order.house}, Ukraine"
+        try:
+            return _order_key(order, idx), geocoder.geocode(addr)
+        except Exception as exc:
+            logger.warning("New order %s geocoding error: %s", _order_key(order, idx), exc)
+            return _order_key(order, idx), None
+
+    if new_orders:
+        with ThreadPoolExecutor(max_workers=min(10, len(new_orders))) as ex:
+            for key, coords in ex.map(_geocode_new, enumerate(new_orders)):
+                if coords:
+                    order_coords[key] = coords
+                else:
+                    logger.warning("New order %s could not be geocoded — will be unassigned", key)
+
+    # --- 3. Build unified OSRM matrix ---
+    all_coords: list[tuple[float, float]] = [depot_coords]
+    for route in existing_routes:
+        for s in route.stops:
+            c = (s.lat, s.lng)
+            if c not in all_coords:
+                all_coords.append(c)
+    for idx, order in enumerate(new_orders):
+        key = _order_key(order, idx)
+        if key in order_coords:
+            c = order_coords[key]
+            if c not in all_coords:
+                all_coords.append(c)
+
+    coord_to_idx = {c: i for i, c in enumerate(all_coords)}
+    depot_idx = coord_to_idx[depot_coords]
+
+    logger.info("Building OSRM matrix for %d coordinates (distribute)", len(all_coords))
+    try:
+        time_matrix, distance_matrix = build_time_matrix(all_coords)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Matrix build failed: {exc}") from exc
+
+    # --- 4. Cheapest feasible insertion (Earliest Deadline First) ---
+    def _urgency(args):
+        _, o = args
+        tw_e = _parse_minutes(o.delivery_window_end)
+        return tw_e if tw_e is not None else MINUTES_PER_DAY
+
+    sorted_orders = sorted(enumerate(new_orders), key=_urgency)
+
+    # Mutable per-route stop lists (shallow copies; inserting new DistributeStop objects)
+    route_stop_lists: list[list] = [list(route.stops) for route in existing_routes]
+    # Effective departure per route — may be shifted forward by departure adjustment
+    route_effective_dep: list[int] = [
+        _parse_minutes(r.departureTime) or 540 for r in existing_routes
+    ]
+    route_departure_adjusted: list[bool] = [False] * len(existing_routes)
+    unassigned: list[tuple[int, object]] = []  # (original_idx, order)
+
+    # Penalty per minute of departure delay (used to compare adjusted vs non-adjusted)
+    _DEP_DELAY_PENALTY = 1.0
+
+    for orig_idx, order in sorted_orders:
+        key = _order_key(order, orig_idx)
+        if key not in order_coords:
+            unassigned.append((orig_idx, order))
+            continue
+
+        new_coord = order_coords[key]
+        new_tw_s = _parse_minutes(order.delivery_window_start)
+        new_tw_e = _parse_minutes(order.delivery_window_end)
+        effective_tw_e = (
+            max(new_tw_s or 0, new_tw_e - time_buffer_min)
+            if new_tw_e is not None else None
+        )
+
+        # best = (penalized_cost, r_idx, pos, dep_min, is_adjusted)
+        best: tuple = (float("inf"), None, None, None, False)
+
+        for r_idx, (route, stops) in enumerate(zip(existing_routes, route_stop_lists)):
+            dep_min = route_effective_dep[r_idx]
+
+            for pos in range(len(stops) + 1):
+                # --- Try with current effective departure ---
+                cost, feasible = _check_insertion(
+                    stops, pos, new_coord, new_tw_s, effective_tw_e,
+                    dep_min, depot_idx, coord_to_idx, time_matrix, max_wait_min,
+                )
+                if feasible and cost < best[0]:
+                    best = (cost, r_idx, pos, dep_min, False)
+
+                # --- Try departure adjustment if enabled and not yet feasible ---
+                if not feasible and allow_departure_adjustment:
+                    adj_dep, adj_cost = _compute_adjusted_departure(
+                        stops, pos, new_coord, new_tw_s, effective_tw_e,
+                        dep_min, earliest_dep_min,
+                        depot_idx, coord_to_idx, time_matrix, max_wait_min,
+                    )
+                    if adj_dep is not None:
+                        penalized = adj_cost + _DEP_DELAY_PENALTY * (adj_dep - dep_min)
+                        if penalized < best[0]:
+                            best = (penalized, r_idx, pos, adj_dep, True)
+
+        penalized_cost, best_route_idx, best_pos, best_dep, is_adjusted = best
+
+        if best_route_idx is not None:
+            new_stop = DistributeStop(
+                id=order.id,
+                city=order.city,
+                address=order.address,
+                house=order.house,
+                delivery_window_start=order.delivery_window_start,
+                delivery_window_end=order.delivery_window_end,
+                lat=new_coord[0],
+                lng=new_coord[1],
+            )
+            route_stop_lists[best_route_idx].insert(best_pos, new_stop)
+            if is_adjusted:
+                route_effective_dep[best_route_idx] = max(
+                    route_effective_dep[best_route_idx], best_dep
+                )
+                route_departure_adjusted[best_route_idx] = True
+            logger.info(
+                "Order %s → route %s pos %d (cost +%d min%s)",
+                key, existing_routes[best_route_idx].courierId, best_pos,
+                int(penalized_cost),
+                f", dep adjusted to {_fmt_time(best_dep)}" if is_adjusted else "",
+            )
+        else:
+            unassigned.append((orig_idx, order))
+            logger.info("Order %s → unassigned (no feasible slot found)", key)
+
+    # --- 5. Recalculate ETAs for all (possibly modified) existing routes ---
+    result_routes: list[dict] = []
+    geo_coords_per_route: list[list[tuple[float, float]]] = []
+
+    for r_idx, (route, stops) in enumerate(zip(existing_routes, route_stop_lists)):
+        dep_min = route_effective_dep[r_idx]
+        stops_out = []
+        current_time = dep_min
+        prev_idx = depot_idx
+        total_drive_min = 0
+        total_dist_m = 0.0
+
+        for i, s in enumerate(stops):
+            s_idx = coord_to_idx[(s.lat, s.lng)]
+            drive_min = int(round(time_matrix[prev_idx][s_idx] / 60))
+            dist_m = distance_matrix[prev_idx][s_idx]
+            natural = current_time + drive_min
+            tw_s = _parse_minutes(s.delivery_window_start)
+            eta = max(natural, tw_s) if tw_s else natural
+            wait_min = max(0, eta - natural)
+
+            stops_out.append({
+                "id": s.id,
+                "stopOrder": i + 1,
+                "address": f"{s.city}, {s.address} {s.house}",
+                "eta": _fmt_time(eta),
+                "driveMin": drive_min,
+                "serviceMin": SERVICE_TIME_PER_STOP,
+                "waitMin": wait_min,
+                "lat": s.lat,
+                "lng": s.lng,
+                "delivery_window_start": s.delivery_window_start,
+                "delivery_window_end": s.delivery_window_end,
+            })
+
+            current_time = eta + SERVICE_TIME_PER_STOP
+            prev_idx = s_idx
+            total_drive_min += drive_min
+            total_dist_m += dist_m
+
+        geo_coords_per_route.append(
+            [depot_coords] + [(s.lat, s.lng) for s in stops] if stops else []
+        )
+        result_routes.append({
+            "courierId": route.courierId,
+            "routeDbId": route.routeDbId,
+            "departureTime": _fmt_time(dep_min),
+            "departureAdjusted": route_departure_adjusted[r_idx],
+            "stops": stops_out,
+            "totalDriveMin": total_drive_min,
+            "totalDistanceKm": round(total_dist_m / 1000, 2),
+            "geometry": None,
+        })
+
+    # --- 6. Solve new routes for unassigned orders via VRPTW ---
+    if unassigned:
+        valid_unassigned = [
+            (orig_idx, o) for orig_idx, o in unassigned
+            if _order_key(o, orig_idx) in order_coords
+        ]
+        if valid_unassigned:
+            ua_orders = [o for _, o in valid_unassigned]
+            ua_orig_idxs = [i for i, _ in valid_unassigned]
+            ua_coords = [order_coords[_order_key(o, i)] for i, o in valid_unassigned]
+
+            sub_coords = [depot_coords] + ua_coords
+            sub_idxs = [coord_to_idx[c] for c in sub_coords]
+            n_sub = len(sub_coords)
+            sub_time = [
+                [time_matrix[sub_idxs[i]][sub_idxs[j]] for j in range(n_sub)]
+                for i in range(n_sub)
+            ]
+            sub_dist = [
+                [distance_matrix[sub_idxs[i]][sub_idxs[j]] for j in range(n_sub)]
+                for i in range(n_sub)
+            ]
+
+            existing_dep_mins = [
+                _parse_minutes(r.departureTime) for r in existing_routes if r.stops
+            ]
+            new_courier_start = min(
+                (d for d in existing_dep_mins if d is not None), default=540
+            )
+
+            sub_time_windows: list[tuple[int, int]] = [(new_courier_start, MINUTES_PER_DAY)]
+            for o in ua_orders:
+                tw_s = _parse_minutes(o.delivery_window_start)
+                tw_e = _parse_minutes(o.delivery_window_end)
+                if tw_s is not None and tw_e is not None:
+                    sub_time_windows.append((tw_s, max(tw_s, tw_e - time_buffer_min)))
+                else:
+                    sub_time_windows.append((0, MINUTES_PER_DAY))
+
+            num_new = max(
+                1,
+                estimate_minimum_couriers(
+                    sub_time_windows, sub_time, SERVICE_TIME_PER_STOP,
+                    new_courier_start, max_route_duration_min=MAX_ROUTE_DURATION_MIN,
+                ),
+            )
+            logger.info("Solving %d unassigned orders with %d new courier(s)", len(ua_orders), num_new)
+
+            try:
+                new_vrp_routes, new_etas, new_dropped, new_departures = solve_vrptw(
+                    sub_time, sub_time_windows, depot=0,
+                    courier_start_time=new_courier_start,
+                    service_time_per_stop=SERVICE_TIME_PER_STOP,
+                    num_couriers=num_new,
+                    capacity=None,
+                    initial_routes=None,
+                    distance_matrix=sub_dist,
+                    max_wait_min=20,
+                    max_route_duration_min=MAX_ROUTE_DURATION_MIN,
+                )
+            except Exception as exc:
+                logger.exception("Solver failed for unassigned orders")
+                raise HTTPException(status_code=500, detail=f"New route solver error: {exc}") from exc
+
+            for node in new_dropped:
+                new_vrp_routes.append([node])
+
+            for v, route_nodes in enumerate(new_vrp_routes):
+                if not route_nodes:
+                    continue
+
+                dep_min = new_departures[v] if v < len(new_departures) else new_courier_start
+                v_etas = new_etas[v] if v < len(new_etas) else []
+
+                stops_out = []
+                current_time = dep_min
+                prev_sub_idx = 0
+                total_drive = 0
+                total_dist = 0.0
+
+                for idx, node in enumerate(route_nodes):
+                    order = ua_orders[node - 1]
+                    o_coord = ua_coords[node - 1]
+
+                    drive_min = int(round(sub_time[prev_sub_idx][node] / 60))
+                    dist_m = sub_dist[prev_sub_idx][node]
+                    natural = current_time + drive_min
+                    tw_s = _parse_minutes(order.delivery_window_start)
+                    solver_eta = v_etas[idx] if idx < len(v_etas) else None
+                    eta_min = max(solver_eta, natural) if solver_eta is not None else natural
+                    if tw_s and eta_min < tw_s:
+                        eta_min = tw_s
+                    wait_min = max(0, eta_min - natural)
+
+                    stops_out.append({
+                        "id": order.id,
+                        "stopOrder": idx + 1,
+                        "address": f"{order.city}, {order.address} {order.house}",
+                        "eta": _fmt_time(eta_min),
+                        "driveMin": drive_min,
+                        "serviceMin": SERVICE_TIME_PER_STOP,
+                        "waitMin": wait_min,
+                        "lat": o_coord[0],
+                        "lng": o_coord[1],
+                        "delivery_window_start": order.delivery_window_start,
+                        "delivery_window_end": order.delivery_window_end,
+                    })
+
+                    current_time = eta_min + SERVICE_TIME_PER_STOP
+                    prev_sub_idx = node
+                    total_drive += drive_min
+                    total_dist += dist_m
+
+                if stops_out:
+                    geo_coords_per_route.append(
+                        [depot_coords] + [ua_coords[n - 1] for n in route_nodes]
+                    )
+                    result_routes.append({
+                        "courierId": None,
+                        "routeDbId": None,
+                        "departureTime": _fmt_time(dep_min),
+                        "stops": stops_out,
+                        "totalDriveMin": total_drive,
+                        "totalDistanceKm": round(total_dist / 1000, 2),
+                        "geometry": None,
+                    })
+
+    # --- 7. Fetch geometries in parallel ---
+    non_empty_geo = [(i, c) for i, c in enumerate(geo_coords_per_route) if len(c) >= 2]
+    if non_empty_geo:
+        idxs, coord_lists = zip(*non_empty_geo)
+        with ThreadPoolExecutor(max_workers=len(coord_lists)) as executor:
+            geometries = list(executor.map(fetch_route_geometry, coord_lists))
+        for i, geom in zip(idxs, geometries):
+            result_routes[i]["geometry"] = geom
+
+    elapsed = time.monotonic() - t_start
+    total_deliveries = sum(len(r["stops"]) for r in result_routes)
+    total_drive_min = sum(r["totalDriveMin"] for r in result_routes)
+    total_dist_km = round(sum(r["totalDistanceKm"] for r in result_routes), 2)
+    logger.info(
+        "Distribute finished in %.2fs — %d routes, %d deliveries, %d unassigned",
+        elapsed, len(result_routes), total_deliveries, len(unassigned),
+    )
+
+    return {
+        "routes": result_routes,
+        "stats": {
+            "totalDeliveries": total_deliveries,
+            "numCouriers": len(result_routes),
+            "totalDistanceKm": total_dist_km,
+            "totalDriveMin": total_drive_min,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
@@ -669,8 +1211,36 @@ class RecalculateRoute(BaseModel):
 
 class RecalculateRequest(BaseModel):
     routes: list[RecalculateRoute]
-    depot: dict | None = None  # {"lat": float, "lng": float}; None → default Kyiv depot
     startTime: str = "09:00"
+
+
+class DistributeStop(BaseModel):
+    id: int | str | None = None
+    stopOrder: int | None = None
+    city: str
+    address: str
+    house: str
+    eta: str | None = None
+    delivery_window_start: str | None = None
+    delivery_window_end: str | None = None
+    lat: float | None = None   # optional — geocoded if missing
+    lng: float | None = None
+
+
+class DistributeRoute(BaseModel):
+    courierId: str | int
+    routeDbId: int | None = None
+    departureTime: str = "09:00"
+    stops: list[DistributeStop]
+
+
+class DistributeRequest(BaseModel):
+    existing_routes: list[DistributeRoute]
+    new_orders: list[OrderInput]
+    time_buffer_min: int = 15
+    max_wait_min: int = 15
+    allow_departure_adjustment: bool = False
+    earliest_departure: str = "08:00"
 
 
 @app.get("/api/health")
@@ -798,8 +1368,6 @@ async def optimize_json(
     return result
 
 
-_DEFAULT_DEPOT = (50.4422, 30.5367)  # Kyiv city center fallback
-
 
 @app.post("/api/recalculate")
 async def recalculate_routes(
@@ -830,18 +1398,13 @@ async def recalculate_routes(
                 detail={"error": "INVALID_INPUT", "message": f"Courier {route.courierId}: {len(invalid)} stop(s) missing lat/lng"},
             )
 
-    if body.depot is not None:
-        depot_lat = body.depot.get("lat")
-        depot_lng = body.depot.get("lng")
-        if depot_lat is None or depot_lng is None:
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "INVALID_INPUT", "message": "depot must have lat and lng"},
-            )
-        depot_coords = (float(depot_lat), float(depot_lng))
-    else:
-        depot_coords = _DEFAULT_DEPOT
-        logger.info("No depot provided, using default Kyiv depot %s", depot_coords)
+    geocoder = GeocodingService()
+    try:
+        depot_coords = geocoder.geocode(DEPOT_ADDRESS, city="Kyiv", country="UA")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Geocoding error: {exc}") from exc
+    if not depot_coords:
+        raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
 
     try:
         result = await asyncio.to_thread(
@@ -851,6 +1414,67 @@ async def recalculate_routes(
         raise
     except Exception as exc:
         logger.exception("Unexpected error in recalculate thread")
+        raise HTTPException(status_code=500, detail=f"Internal error: {exc}") from exc
+
+    return result
+
+
+@app.post("/api/distribute")
+async def distribute_orders(
+    body: DistributeRequest,
+    x_api_key: str | None = Header(default=None),
+):
+    """
+    Insert new deliveries into existing fixed routes.
+
+    Existing stop order is immutable — only insertions between/after existing stops.
+    Each new order is placed using cheapest-insertion heuristic (EDF priority).
+    Orders that cannot fit any existing route are assigned to new routes via VRPTW.
+    All ETAs are recalculated using real OSRM travel times.
+    """
+    _check_api_key(x_api_key)
+
+    if not body.existing_routes:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": "existing_routes cannot be empty"},
+        )
+    if not body.new_orders:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": "new_orders cannot be empty"},
+        )
+
+    geocoder = GeocodingService()
+    try:
+        depot_coords = geocoder.geocode(DEPOT_ADDRESS, city="Kyiv", country="UA")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Geocoding error: {exc}") from exc
+    if not depot_coords:
+        raise HTTPException(status_code=500, detail=f"Could not geocode depot: {DEPOT_ADDRESS}")
+
+    earliest_dep_min = _parse_minutes(body.earliest_departure)
+    if earliest_dep_min is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "INVALID_INPUT", "message": f"Invalid earliest_departure: {body.earliest_departure!r}"},
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            _distribute_sync,
+            body.existing_routes,
+            body.new_orders,
+            depot_coords,
+            body.time_buffer_min,
+            body.max_wait_min,
+            body.allow_departure_adjustment,
+            earliest_dep_min,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error in distribute thread")
         raise HTTPException(status_code=500, detail=f"Internal error: {exc}") from exc
 
     return result
