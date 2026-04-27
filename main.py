@@ -382,7 +382,7 @@ def _optimize_sync(
         route_distance_m = sum(
             distance_matrix[prev_chain[i]][route_nodes[i]]
             for i in range(len(route_nodes))
-        ) + distance_matrix[route_nodes[-1]][0]
+        )
 
         for idx, node in enumerate(route_nodes):
             order = geocoded[node - 1]
